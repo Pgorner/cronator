@@ -1,8 +1,8 @@
 {
   "version": 2,
-  "dgSpecHash": "DjNTymdywYY=",
+  "dgSpecHash": "bFG5hmt8Krc=",
   "success": true,
-  "projectFilePath": "C:\\Users\\Patrick\\Documents\\Cronos\\service_cat\\cronator\\cronator.csproj",
+  "projectFilePath": "C:\\Users\\Patrick\\Documents\\Cronos\\cronator\\cronator.csproj",
   "expectedPackageFiles": [
     "C:\\Users\\Patrick\\.nuget\\packages\\microsoft.web.webview2\\1.0.2592.51\\microsoft.web.webview2.1.0.2592.51.nupkg.sha512"
   ],

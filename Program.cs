@@ -189,7 +189,7 @@ namespace Cronator
                 ListMonitorsSPAN(screens);
                 if (screens.Count > 0) { SelectMonitorSPAN(0, screens); UpdateSelectedSPAN(screens); }
             }
-
+            Tray.Start();
             // Console loop
             while (true)
             {
@@ -283,9 +283,9 @@ namespace Cronator
             try
             {
                 using var key = Registry.CurrentUser.OpenSubKey(@"Control Panel\Desktop", false);
-                _backupWall  = key?.GetValue("WallPaper") as string;
+                _backupWall = key?.GetValue("WallPaper") as string;
                 _backupStyle = Convert.ToInt32(key?.GetValue("WallpaperStyle") ?? 10);
-                _backupTile  = Convert.ToInt32(key?.GetValue("TileWallpaper") ?? 0);
+                _backupTile = Convert.ToInt32(key?.GetValue("TileWallpaper") ?? 0);
             }
             catch { }
 
@@ -363,7 +363,7 @@ namespace Cronator
                     try
                     {
                         if (_dw != null) { ListMonitorsCOM(out var ids, out var rects); UpdateSelectedCOM(ids, rects); }
-                        else { var screens = System.Windows.Forms.Screen.AllScreens.ToList(); UpdateSelectedSPAN(screens, cycleColor:true); }
+                        else { var screens = System.Windows.Forms.Screen.AllScreens.ToList(); UpdateSelectedSPAN(screens, cycleColor: true); }
                     }
                     catch { }
                     try { await Task.Delay(TimeSpan.FromSeconds(sec), _ticker.Token); }
@@ -509,7 +509,7 @@ namespace Cronator
                 using (var key = Registry.CurrentUser.OpenSubKey(@"Control Panel\Desktop", true))
                 {
                     key?.SetValue("WallpaperStyle", "22", RegistryValueKind.String); // Span
-                    key?.SetValue("TileWallpaper", "0",  RegistryValueKind.String);
+                    key?.SetValue("TileWallpaper", "0", RegistryValueKind.String);
                 }
 
                 if (!ApplyWallpaperAll(outPath))
@@ -611,5 +611,59 @@ namespace Cronator
             int dy = (monitorRect.Top - virt.Top) + (monitorRect.Height - dh) / 2;
             g.DrawImage(img, new Rectangle(dx, dy, dw, dh), new Rectangle(0, 0, img.Width, img.Height), GraphicsUnit.Pixel);
         }
+        
+        // ===== Tray hooks (called by tray/UI thread) =====
+        internal static void TrayExitRequested()
+        {
+            StopTimer();
+            TryRestore();
+            Cronator.Tray.Stop();
+            Environment.Exit(0);
+        }
+
+        internal static string[] TrayGetMonitorList()
+        {
+            // Names like "2560x1440 primary" etc.
+            var screens = System.Windows.Forms.Screen.AllScreens.ToList();
+            return screens.Select(s => $"{s.Bounds.Width}x{s.Bounds.Height}" + (s.Primary ? " (primary)" : ""))
+                        .ToArray();
+        }
+
+        internal static int TrayGetSelectedMonitorIndex() => _monIndex < 0 ? 0 : _monIndex;
+
+        internal static void TraySelectMonitor(int index)
+        {
+            if (_dw != null)
+            {
+                ListMonitorsCOM(out var ids, out var rects);
+                SelectMonitorCOM(Math.Max(0, Math.Min(index, ids.Count - 1)), ids, rects);
+            }
+            else
+            {
+                var screens = System.Windows.Forms.Screen.AllScreens.ToList();
+                SelectMonitorSPAN(Math.Max(0, Math.Min(index, screens.Count - 1)), screens);
+            }
+        }
+
+        internal static void TraySetColor(string name) => SetColor(name);
+
+        internal static string TrayGetColorName()
+        {
+            // Simple exposure of current color name; if you want exact, keep a separate field.
+            return "green"; // minimal; optional: track last chosen name in a field and return it
+        }
+
+        internal static void TraySetTimer(int? seconds)
+        {
+            if (seconds.HasValue && seconds.Value > 0) StartTimer(seconds.Value);
+            else StopTimer();
+        }
+
+        internal static void TrayUpdateOnce()
+        {
+            if (_dw != null) { ListMonitorsCOM(out var ids, out var rects); UpdateSelectedCOM(ids, rects); }
+            else { var screens = System.Windows.Forms.Screen.AllScreens.ToList(); UpdateSelectedSPAN(screens); }
+        }
+
     }
 }

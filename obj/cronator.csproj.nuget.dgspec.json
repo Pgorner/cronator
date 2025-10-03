@@ -1,17 +1,17 @@
 {
   "format": 1,
   "restore": {
-    "C:\\Users\\Patrick\\Documents\\Cronos\\service_cat\\cronator\\cronator.csproj": {}
+    "C:\\Users\\Patrick\\Documents\\Cronos\\cronator\\cronator.csproj": {}
   },
   "projects": {
-    "C:\\Users\\Patrick\\Documents\\Cronos\\service_cat\\cronator\\cronator.csproj": {
+    "C:\\Users\\Patrick\\Documents\\Cronos\\cronator\\cronator.csproj": {
       "version": "1.0.0",
       "restore": {
-        "projectUniqueName": "C:\\Users\\Patrick\\Documents\\Cronos\\service_cat\\cronator\\cronator.csproj",
+        "projectUniqueName": "C:\\Users\\Patrick\\Documents\\Cronos\\cronator\\cronator.csproj",
         "projectName": "cronator",
-        "projectPath": "C:\\Users\\Patrick\\Documents\\Cronos\\service_cat\\cronator\\cronator.csproj",
+        "projectPath": "C:\\Users\\Patrick\\Documents\\Cronos\\cronator\\cronator.csproj",
         "packagesPath": "C:\\Users\\Patrick\\.nuget\\packages\\",
-        "outputPath": "C:\\Users\\Patrick\\Documents\\Cronos\\service_cat\\cronator\\obj\\",
+        "outputPath": "C:\\Users\\Patrick\\Documents\\Cronos\\cronator\\obj\\",
         "projectStyle": "PackageReference",
         "fallbackFolders": [
           "C:\\Program Files (x86)\\Microsoft Visual Studio\\Shared\\NuGetPackages"
