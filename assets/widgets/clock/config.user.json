@@ -1,0 +1,17 @@
+{
+  "enabled": true,
+  "settings": {
+    "format": "HH:mm",
+    "fontPx": 120,
+    "scale": 0.45,
+    "anchor": "bottom-right",
+    "offsetX": -48,
+    "offsetY": -48,
+    "autoFit": true,
+    "maxBoxPctW": 0.30,
+    "maxBoxPctH": 0.12,
+    "color": "#FFFFFF",
+    "shadow": "#80000000",
+    "bg": false
+  }
+}

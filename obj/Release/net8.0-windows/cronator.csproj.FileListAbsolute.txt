@@ -52,3 +52,4 @@ C:\Users\Patrick\Documents\Cronos\cronator\obj\Release\net8.0-windows\cronator.c
 C:\Users\Patrick\Documents\Cronos\cronator\bin\Release\net8.0-windows\assets\widgets\clock\net8.0-windows\ClockWidget.deps.json
 C:\Users\Patrick\Documents\Cronos\cronator\bin\Release\net8.0-windows\assets\widgets\clock\net8.0-windows\ClockWidget.dll
 C:\Users\Patrick\Documents\Cronos\cronator\bin\Release\net8.0-windows\assets\widgets\clock\net8.0-windows\ClockWidget.pdb
+C:\Users\Patrick\Documents\Cronos\cronator\bin\Release\net8.0-windows\assets\widgets\clock\config.user.json

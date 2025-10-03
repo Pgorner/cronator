@@ -517,10 +517,6 @@ namespace Cronator
                 baseWall = LoadImageUnlocked(_backupWallLocal);
             else if (!string.IsNullOrWhiteSpace(_backupWall) && File.Exists(_backupWall))
                 baseWall = LoadImageUnlocked(_backupWall);
-            // else -> null: we'll paint a solid background
-
-            // choose overlay color
-            Color overlay = cycleColor ? NextColor() : _palette[_paletteIdx];
 
             string outPath = Path.Combine(TempDir, $"cronator_span_{DateTime.Now:yyyyMMdd_HHmmss_fff}.bmp");
             try
@@ -528,14 +524,15 @@ namespace Cronator
                 using var big = new Bitmap(W, H);
                 using (var g = Graphics.FromImage(big))
                 {
-                    g.SmoothingMode       = SmoothingMode.AntiAlias;
-                    g.InterpolationMode   = InterpolationMode.HighQualityBicubic;
-                    g.PixelOffsetMode     = PixelOffsetMode.HighQuality;
-                    g.CompositingQuality  = CompositingQuality.HighQuality;
-                    g.CompositingMode     = CompositingMode.SourceOver;
-                    g.TextRenderingHint   = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
+                    // Quality
+                    g.SmoothingMode      = SmoothingMode.AntiAlias;
+                    g.InterpolationMode  = InterpolationMode.HighQualityBicubic;
+                    g.PixelOffsetMode    = PixelOffsetMode.HighQuality;
+                    g.CompositingQuality = CompositingQuality.HighQuality;
+                    g.CompositingMode    = CompositingMode.SourceOver;
+                    g.TextRenderingHint  = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
 
-                    // Fresh base every tick (no reuse of previous composite)
+                    // Base wallpaper (Fill on each screen)
                     if (baseWall != null)
                     {
                         foreach (var scr in screens)
@@ -543,9 +540,31 @@ namespace Cronator
                     }
                     else
                     {
-                        g.Clear(Color.Black); // or DimGray
+                        g.Clear(Color.Black);
                     }
 
+                    // ---- DEBUG: red frame + host test text, so we know coords are right ----
+                    // int ox = selected.Left - virt.Left;
+                    // int oy = selected.Top  - virt.Top;
+
+                    // using (var pen = new Pen(Color.Red, Math.Max(2, selected.Width / 400)))
+                    //     g.DrawRectangle(pen, ox, oy, selected.Width - 1, selected.Height - 1);
+
+                    // using (var tf = new Font("Segoe UI", Math.Max(22, selected.Height / 18f), FontStyle.Bold, GraphicsUnit.Pixel))
+                    // {
+                    //     string t = "HOST TEST";
+                    //     var sz = g.MeasureString(t, tf);
+                    //     float tx = ox + (selected.Width  - sz.Width)  / 2f;
+                    //     float ty = oy + (selected.Height - sz.Height) / 2f;
+                    //     using var sh = new SolidBrush(Color.FromArgb(180, 0, 0, 0));
+                    //     using var br = new SolidBrush(Color.Lime);
+                    //     g.DrawString(t, tf, sh, tx + 2, ty + 2);
+                    //     g.DrawString(t, tf, br, tx, ty);
+                    // }
+                    // -----------------------------------------------------------------------
+
+                    // Finally: draw all widgets into the selected monitor area
+                    _widgets.DrawAll(g, selected, virt, DateTime.Now);
                 }
 
                 if (!SaveBmpWithRetry(big, outPath))
@@ -554,12 +573,7 @@ namespace Cronator
                     return;
                 }
 
-                // Apply as Span
-                using (var key = Registry.CurrentUser.OpenSubKey(@"Control Panel\Desktop", true))
-                {
-                    key?.SetValue("WallpaperStyle", "22", RegistryValueKind.String); // Span
-                    key?.SetValue("TileWallpaper", "0",  RegistryValueKind.String);
-                }
+                EnsureSpanStyleSetOnce();
 
                 if (!ApplyWallpaperAll(outPath))
                 {
@@ -567,13 +581,11 @@ namespace Cronator
                 }
                 else
                 {
-                    Console.WriteLine($"Applied SPAN wallpaper: {outPath}");
-                    // no currentPath / _lastSpanBase updates here
-                    // Clean old files (keep last 3)
+                    // keep only a few old files
                     try
                     {
                         foreach (var f in Directory.EnumerateFiles(TempDir, "cronator_span_*.bmp")
-                                                .OrderByDescending(f => f).Skip(3))
+                                                    .OrderByDescending(f => f).Skip(3))
                             try { File.Delete(f); } catch { }
                     }
                     catch { }
@@ -588,6 +600,7 @@ namespace Cronator
                 baseWall?.Dispose();
             }
         }
+
 
 
         // ===== Drawing helpers =====

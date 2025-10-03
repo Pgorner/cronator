@@ -13,7 +13,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("ClockWidget")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+82a327890192252df58b0df47bdbc215f932070c")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+c9471d1cd01840f67e1206629ed4601040989189")]
 [assembly: System.Reflection.AssemblyProductAttribute("ClockWidget")]
 [assembly: System.Reflection.AssemblyTitleAttribute("ClockWidget")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]
