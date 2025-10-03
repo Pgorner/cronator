@@ -1,15 +1,38 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
-    <OutputType>Exe</OutputType> <!-- console window ON -->
+    <OutputType>Exe</OutputType>
     <TargetFramework>net8.0-windows</TargetFramework>
     <UseWindowsForms>true</UseWindowsForms>
     <EnableWindowsTargeting>true</EnableWindowsTargeting>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
   </PropertyGroup>
+
+  <!-- Build the widget project automatically -->
   <ItemGroup>
-    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.2592.51" />
+    <ProjectReference Include="assets\widgets\clock\ClockWidget.csproj" />
+  </ItemGroup>
+
+  <!-- Make sure we DO NOT compile or copy nested obj/bin from widget folders -->
+  <ItemGroup>
+    <!-- Stop the SDK default Compile/None globs from picking up generated .cs -->
+    <Compile Remove="assets\widgets\**\obj\**\*.cs" />
+    <Compile Remove="assets\widgets\**\bin\**\*.cs" />
+    <None    Remove="assets\widgets\**\obj\**\*" />
+    <None    Remove="assets\widgets\**\bin\**\*" />
+    <Content Remove="assets\widgets\**\obj\**\*" />
+    <Content Remove="assets\widgets\**\bin\**\*" />
+  </ItemGroup>
+
+  <!-- Copy only the useful stuff in assets (logos + widget trees),
+       but still exclude any nested obj/bin that might exist -->
+  <ItemGroup>
     <EmbeddedResource Include="assets\logo.gif" />
     <EmbeddedResource Include="assets\logo.ico" />
+
+    <Content Include="assets\**\*"
+             Exclude="assets\widgets\**\obj\**;assets\widgets\**\bin\**">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
   </ItemGroup>
 </Project>

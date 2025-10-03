@@ -1,0 +1,11 @@
+{
+  "enabled": true,
+  "position": "UpperRight",
+  "fontSize": 64,
+  "format": "HH:mm:ss",
+  "margin": 24,
+  "shadow": true,
+  "color": "#FFFFFFFF",
+  "fontFamily": "Segoe UI",
+  "fontStyle": "Bold"
+}

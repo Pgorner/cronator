@@ -1,0 +1,12 @@
+C:\Users\Patrick\Documents\Cronos\cronator\assets\widgets\clock\obj\Debug\ClockWidget.GeneratedMSBuildEditorConfig.editorconfig
+C:\Users\Patrick\Documents\Cronos\cronator\assets\widgets\clock\obj\Debug\ClockWidget.AssemblyInfoInputs.cache
+C:\Users\Patrick\Documents\Cronos\cronator\assets\widgets\clock\obj\Debug\ClockWidget.AssemblyInfo.cs
+C:\Users\Patrick\Documents\Cronos\cronator\assets\widgets\clock\obj\Debug\ClockWidget.csproj.CoreCompileInputs.cache
+C:\Users\Patrick\Documents\Cronos\cronator\assets\widgets\clock\obj\Debug\ClockWidget.sourcelink.json
+C:\Users\Patrick\Documents\Cronos\cronator\assets\widgets\clock\obj\Debug\ClockWidget.dll
+C:\Users\Patrick\Documents\Cronos\cronator\assets\widgets\clock\obj\Debug\refint\ClockWidget.dll
+C:\Users\Patrick\Documents\Cronos\cronator\assets\widgets\clock\obj\Debug\ClockWidget.pdb
+C:\Users\Patrick\Documents\Cronos\cronator\assets\widgets\clock\ClockWidget.deps.json
+C:\Users\Patrick\Documents\Cronos\cronator\assets\widgets\clock\ClockWidget.dll
+C:\Users\Patrick\Documents\Cronos\cronator\assets\widgets\clock\obj\Debug\ref\ClockWidget.dll
+C:\Users\Patrick\Documents\Cronos\cronator\assets\widgets\clock\ClockWidget.pdb
