@@ -189,7 +189,11 @@ namespace Cronator
                 ListMonitorsSPAN(screens);
                 if (screens.Count > 0) { SelectMonitorSPAN(0, screens); UpdateSelectedSPAN(screens); }
             }
-            Tray.Start();
+            Tray.StartFromEmbedded(
+                icoResource: "cronator.assets.logo.ico",
+                gifResource: "cronator.assets.logo.gif",
+                gifFps: 8
+            );
             // Console loop
             while (true)
             {
