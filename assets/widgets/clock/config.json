@@ -1,11 +1,19 @@
 {
   "enabled": true,
-  "position": "UpperRight",
-  "fontSize": 64,
-  "format": "HH:mm:ss",
-  "margin": 24,
-  "shadow": true,
-  "color": "#FFFFFFFF",
-  "fontFamily": "Segoe UI",
-  "fontStyle": "Bold"
+  "settings": {
+    "format": "HH:mm:ss",
+    "anchor": "top-right",
+    "fontPx": 120,
+    "scale": 1.0,
+    "offsetX": -40,
+    "offsetY": 40,
+    "autoFit": false,
+    "maxBoxPctW": 0.40,
+    "maxBoxPctH": 0.20,
+    "color": "#FFFFFFFF",
+    "shadow": "#80000000",
+    "bg": false,
+    "fontFamily": "Segoe UI",
+    "fontStyle": "Bold"
+  }
 }

@@ -6,10 +6,9 @@
   "kind": "dll",
   "assembly": "ClockWidget.dll",
   "type": "ClockWidgetNS.ClockWidget",
+  "defaultRect": { "nx": 0.72, "ny": 0.03, "nw": 0.22, "nh": 0.13 },
   "settings": {
     "format": "HH:mm:ss",
-    "position": "UpperRight",
-    "fontSize": 0,
     "color": "#FFFFFFFF",
     "shadow": true,
     "bg": false

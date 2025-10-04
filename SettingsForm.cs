@@ -6,8 +6,8 @@ using System.IO;
 using System.Linq;
 using System.Reflection;
 using System.Text.Json;
-using System.Windows.Forms;
 using System.Text.Json.Nodes;
+using System.Windows.Forms;
 
 namespace Cronator
 {
@@ -76,7 +76,7 @@ namespace Cronator
                 string root = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "assets", "settingstabs");
                 _tabs.LoadFromFolder(root);
 
-                // Try to inject live monitor snapshots into Monitors tab types (if loaded)
+                // inject provider for monitors tab types (if present)
                 TryInjectMonitorsProviderIfAvailable();
 
                 foreach (var t in _tabs.Tabs)
@@ -111,7 +111,7 @@ namespace Cronator
 
         private void Nav_AfterSelect(object? sender, TreeViewEventArgs e)
         {
-            // Try again here in case assembly was loaded after BuildNavFromTabs
+            // try again here in case assembly was loaded after BuildNavFromTabs
             TryInjectMonitorsProviderIfAvailable();
 
             var node = e.Node;
@@ -133,47 +133,6 @@ namespace Cronator
             }
         }
 
-
-        /// <summary>
-        /// Sets Cronator.SettingsTabs.Monitors.MonitorsTab.SnapshotProvider (if present)
-        /// on the assembly that defines the selected tab.
-        /// </summary>
-        
-        private void EnsureMonitorsSnapshotProvider(TabManager.TabHandle handle)
-        {
-            try
-            {
-                var asm = handle.Assembly; // << use the tab assembly we stored
-                if (asm == null) return;
-
-                var tabType     = asm.GetType("Cronator.SettingsTabs.Monitors.MonitorsTab");
-                var snapType    = asm.GetType("Cronator.SettingsTabs.Monitors.MonitorSnapshot");
-                var widgetBoxTy = asm.GetType("Cronator.SettingsTabs.Monitors.WidgetBox");
-                if (tabType == null || snapType == null || widgetBoxTy == null) return;
-
-                var listSnapType = typeof(List<>).MakeGenericType(snapType);
-                var funcType     = typeof(Func<>).MakeGenericType(listSnapType);
-
-                var method = typeof(SettingsForm).GetMethod(
-                    nameof(BuildMonitorSnapshotsObjects),
-                    BindingFlags.NonPublic | BindingFlags.Static
-                )!;
-                var generic = method.MakeGenericMethod(snapType, widgetBoxTy);
-
-                // Build a compatible Func<List<MonitorSnapshot>> for the tab’s types.
-                var del = generic.CreateDelegate(funcType);
-
-                var prop = tabType.GetProperty("SnapshotProvider",
-                    BindingFlags.Public | BindingFlags.Static);
-                prop?.SetValue(null, del);
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine("[Tabs] EnsureMonitorsSnapshotProvider error: " + ex.Message);
-            }
-        }
-
-
         private void ShowPage(Control page)
         {
             if (_currentPage != null)
@@ -193,24 +152,21 @@ namespace Cronator
         /// If the Monitors tab assembly is loaded, set its static SnapshotProvider (via reflection)
         /// to a delegate that returns the actual, current widget placements normalized per monitor.
         /// </summary>
-
         private void TryInjectMonitorsProviderIfAvailable()
         {
             try
             {
                 foreach (var h in _tabs.Tabs)
                 {
-                    var asm = h.Assembly; // << use tab assembly
+                    var asm = h.Assembly;
                     if (asm == null) continue;
 
-                    // Prefer known types first
+                    // Prefer known types first (faster), then exported
                     var knownTypes = new[]
                     {
                         asm.GetType("Cronator.SettingsTabs.Monitors.MonitorsTab"),
                         asm.GetType("Cronator.SettingsTabs.Monitors.MonitorsInterop")
-                    }.Where(t => t != null)! // ensure non-null
-                    .Cast<Type>()           // cast to non-nullable Type
-                    .ToArray();
+                    }.Where(t => t != null)!.Cast<Type>().ToArray();
 
                     IEnumerable<Type> exportedPlusKnown =
                         knownTypes.Any()
@@ -231,13 +187,7 @@ namespace Cronator
                             Console.WriteLine($"[Tabs] monitors: inspecting {prop.DeclaringType?.FullName}.{prop.Name} : {prop.PropertyType.FullName}");
 
                             var propType = prop.PropertyType;
-                            if (!propType.IsGenericType)
-                            {
-                                Console.WriteLine("  - reject: property type is not generic (expect Func<>)");
-                                continue;
-                            }
-
-                            if (propType.GetGenericTypeDefinition() != typeof(Func<>))
+                            if (!propType.IsGenericType || propType.GetGenericTypeDefinition() != typeof(Func<>))
                             {
                                 Console.WriteLine("  - reject: property type is not Func<>");
                                 continue;
@@ -255,11 +205,18 @@ namespace Cronator
 
                             var wbType = asm.GetExportedTypes().FirstOrDefault(t => t.Namespace == snapType.Namespace && t.Name == "WidgetBox")
                                     ?? asm.GetExportedTypes().FirstOrDefault(t => t.Name == "WidgetBox");
-
-                            if (wbType == null) { Console.WriteLine("  - reject: WidgetBox type not found"); continue; }
+                            if (wbType == null)
+                            {
+                                Console.WriteLine("  - reject: WidgetBox type not found");
+                                continue;
+                            }
 
                             var buildMethod = typeof(SettingsForm).GetMethod(nameof(BuildMonitorSnapshotsObjects), BindingFlags.NonPublic | BindingFlags.Static);
-                            if (buildMethod == null) { Console.WriteLine("  - reject: builder method missing"); continue; }
+                            if (buildMethod == null)
+                            {
+                                Console.WriteLine("  - reject: builder method missing");
+                                continue;
+                            }
 
                             var closedBuilder = buildMethod.MakeGenericMethod(snapType, wbType);
                             var del = Delegate.CreateDelegate(propType, closedBuilder);
@@ -283,7 +240,6 @@ namespace Cronator
             }
         }
 
-
         /// <summary>
         /// Builds List&lt;TMonitorSnapshot&gt; where TMonitorSnapshot, TWidgetBox are the types from the MonitorsTab assembly.
         /// Uses current Screen.AllScreens and widget configs under assets/widgets.
@@ -299,16 +255,16 @@ namespace Cronator
             var snType = typeof(TMonitorSnapshot);
             var wbType = typeof(TWidgetBox);
 
-            var snBoundsProp = snType.GetProperty("Bounds")!;
-            var snLabelProp = snType.GetProperty("Label")!;
-            var snIsPrimaryProp = snType.GetProperty("IsPrimary")!;
-            var snIndexProp = snType.GetProperty("Index")!;
-            var snWidgetsProp = snType.GetProperty("Widgets")!; // List<WidgetBox>
+            var snBoundsProp   = snType.GetProperty("Bounds")!;
+            var snLabelProp    = snType.GetProperty("Label")!;
+            var snIsPrimaryProp= snType.GetProperty("IsPrimary")!;
+            var snIndexProp    = snType.GetProperty("Index")!;
+            var snWidgetsProp  = snType.GetProperty("Widgets")!; // List<WidgetBox>
 
-            var wbRectProp = wbType.GetProperty("RectNorm")!;
-            var wbNameProp = wbType.GetProperty("Name")!;
-            var wbColorProp = wbType.GetProperty("Color")!;
-            var wbEnabledProp = wbType.GetProperty("Enabled")!;
+            var wbRectProp   = wbType.GetProperty("RectNorm")!;
+            var wbNameProp   = wbType.GetProperty("Name")!;
+            var wbColorProp  = wbType.GetProperty("Color")!;
+            var wbEnabledProp= wbType.GetProperty("Enabled")!;
 
             // Build placements from disk
             var placements = ReadWidgetPlacements(screens);
@@ -359,11 +315,11 @@ namespace Cronator
         /// Read widgets under assets/widgets/*, combine manifest + config.user.json,
         /// decide monitor index and normalized rectangle (nx,ny,nw,nh or pixel fallback).
         /// </summary>
+        // ===================== NORMALIZED-ONLY PLACEMENTS =====================
         private static Dictionary<int, List<Placement>> ReadWidgetPlacements(Screen[] screens)
         {
             var root = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "assets", "widgets");
             var map = new Dictionary<int, List<Placement>>();
-
             if (!Directory.Exists(root)) return map;
 
             foreach (var dir in Directory.EnumerateDirectories(root))
@@ -374,70 +330,84 @@ namespace Cronator
                     var userPath     = Path.Combine(dir, "config.user.json");
 
                     string displayName = Path.GetFileName(dir);
-                    bool enabled = false; // default off unless manifest/user enables
-
+                    bool enabled = false;
                     JsonNode? settingsNode = null;
 
-                    // Manifest
+                    // --- Read manifest (displayName, enabled, defaultRect) ---
+                    float? dnx = null, dny = null, dnw = null, dnh = null;
                     if (File.Exists(manifestPath))
                     {
-                        var mn = JsonNode.Parse(File.ReadAllText(manifestPath)) as JsonObject;
-                        if (mn != null)
+                        if (JsonNode.Parse(File.ReadAllText(manifestPath)) is JsonObject mn)
                         {
                             if (mn["displayName"] is JsonValue dv && dv.TryGetValue<string>(out var dn) && !string.IsNullOrWhiteSpace(dn))
                                 displayName = dn;
 
                             if (mn["enabled"] is JsonValue ev && ev.TryGetValue<bool>(out var en))
                                 enabled = en;
+
+                            if (mn["defaultRect"] is JsonObject dr)
+                            {
+                                dnx = GetFloat(dr, "nx");
+                                dny = GetFloat(dr, "ny");
+                                dnw = GetFloat(dr, "nw");
+                                dnh = GetFloat(dr, "nh");
+                            }
                         }
                     }
 
-                    // User config overrides
+                    // --- User overrides (enabled, settings{ monitor, nx..nh }) ---
+                    int? monFromUser = null;
                     if (File.Exists(userPath))
                     {
-                        var un = JsonNode.Parse(File.ReadAllText(userPath)) as JsonObject;
-                        if (un != null)
+                        if (JsonNode.Parse(File.ReadAllText(userPath)) is JsonObject un)
                         {
-                            if (un["enabled"] is JsonValue ev && ev.TryGetValue<bool>(out var en))
-                                enabled = en;
+                            if (un["enabled"] is JsonValue e2 && e2.TryGetValue<bool>(out var en2))
+                                enabled = en2;
 
                             if (un["settings"] is JsonObject so)
+                            {
                                 settingsNode = so;
+
+                                // monitor / screen / display
+                                if (TryGetInt(so, out var mi, "monitor", "screen", "display"))
+                                    monFromUser = mi;
+                            }
                         }
                     }
 
-                    if (!enabled) continue; // only show enabled widgets
+                    if (!enabled) continue; // honor enabled flags
 
-                    // Monitor index (monitor|screen|display)
-                    int mon = 0;
-                    if (!TryGetInt(settingsNode, out mon, "monitor", "screen", "display"))
-                        mon = 0;
-
+                    // Decide target monitor index
+                    int mon = monFromUser ?? 0;
                     if (mon < 0 || mon >= screens.Length) mon = 0;
 
-                    // Normalized rect if available
-                    RectangleF rectN = new RectangleF(0.05f, 0.05f, 0.20f, 0.12f); // sensible default
+                    // Preferred rect order: user nx..nh → manifest defaultRect → hardcoded fallback
                     float? nx = GetFloat(settingsNode, "nx");
                     float? ny = GetFloat(settingsNode, "ny");
                     float? nw = GetFloat(settingsNode, "nw");
                     float? nh = GetFloat(settingsNode, "nh");
 
+                    RectangleF rectN;
                     if (nx.HasValue || ny.HasValue || nw.HasValue || nh.HasValue)
                     {
                         rectN = new RectangleF(
-                            Clamp01(nx ?? 0.05f),
-                            Clamp01(ny ?? 0.05f),
-                            Clamp01(nw ?? 0.20f),
-                            Clamp01(nh ?? 0.12f));
+                            Clamp01(nx ?? 0.72f),
+                            Clamp01(ny ?? 0.03f),
+                            Clamp01(nw ?? 0.22f),
+                            Clamp01(nh ?? 0.13f));
+                    }
+                    else if (dnx.HasValue || dny.HasValue || dnw.HasValue || dnh.HasValue)
+                    {
+                        rectN = new RectangleF(
+                            Clamp01(dnx ?? 0.72f),
+                            Clamp01(dny ?? 0.03f),
+                            Clamp01(dnw ?? 0.22f),
+                            Clamp01(dnh ?? 0.13f));
                     }
                     else
                     {
-                        // Derive from common anchor/offset clock settings so the initial view matches what you see
-                        var s = screens[mon];
-                        var rectFromAnchor = RectFromAnchor(s, settingsNode);
-                        rectN = rectFromAnchor;
+                        rectN = new RectangleF(0.72f, 0.03f, 0.22f, 0.13f); // final fallback
                     }
-
 
                     rectN = NormalizeRect(rectN);
 
@@ -480,55 +450,6 @@ namespace Cronator
             }
             return null;
         }
-
-        // Already present in your file (keep these); shown here for clarity:
-        // private static float? GetFloat(JsonNode? settings, string key) { ... } 
-        // private static bool TryGetInt(JsonNode? settings, out int value, params string[] keys) { ... }
-
-        // ---------- Anchor → normalized rect (JsonNode version) ----------
-        private static RectangleF RectFromAnchor(Screen s, JsonNode? settings)
-        {
-            string fmt    = GetString(settings, "format") ?? "HH:mm:ss";
-            float fontPx  = GetFirstFloat(settings, "fontPx") ?? 120f;
-            float scale   = GetFirstFloat(settings, "scale")  ?? 1f;
-            string anchor = (GetString(settings, "anchor") ?? "top-right").ToLowerInvariant();
-            int offX      = (int)(GetFirstFloat(settings, "offsetX") ?? 0f);
-            int offY      = (int)(GetFirstFloat(settings, "offsetY") ?? 0f);
-
-            // Measure using a probe font (device px)
-            var now = DateTime.Now.ToString(fmt);
-            SizeF textSize;
-            using (var bmp = new Bitmap(1,1))
-            using (var g = Graphics.FromImage(bmp))
-            using (var f = new Font("Segoe UI", Math.Max(8f, fontPx * scale), FontStyle.Bold, GraphicsUnit.Pixel))
-                textSize = g.MeasureString(now, f);
-
-            var m = s.Bounds;
-            float x, y;
-            switch (anchor)
-            {
-                case "top-left":      x = 0;                  y = 0;                   break;
-                case "top-right":     x = m.Width - textSize.Width;  y = 0;            break;
-                case "bottom-left":   x = 0;                  y = m.Height - textSize.Height; break;
-                case "bottom-right":  x = m.Width - textSize.Width;  y = m.Height - textSize.Height; break;
-                case "center":        x = (m.Width - textSize.Width)/2f; y = (m.Height - textSize.Height)/2f; break;
-                default:              x = m.Width - textSize.Width;    y = 0;          break;
-            }
-            x += offX; y += offY;
-
-            float nx = Clamp01((float)x / Math.Max(1, m.Width));
-            float ny = Clamp01((float)y / Math.Max(1, m.Height));
-            float nw = Clamp01((float)textSize.Width  / Math.Max(1, m.Width));
-            float nh = Clamp01((float)textSize.Height / Math.Max(1, m.Height));
-
-            nw = Math.Max(0.01f, nw);
-            nh = Math.Max(0.01f, nh);
-            if (nx + nw > 1f) nx = 1f - nw;
-            if (ny + nh > 1f) ny = 1f - nh;
-
-            return new RectangleF(nx, ny, nw, nh);
-        }
-
 
         private static bool TryGetInt(JsonNode? settings, out int value, params string[] keys)
         {
@@ -588,6 +509,96 @@ namespace Cronator
             return new RectangleF(x, y, w, h);
         }
 
+        // Anchor → normalized rect (JsonNode version)
+        private static RectangleF RectFromAnchor(Screen s, JsonNode? settings)
+        {
+            string fmt       = GetString(settings, "format") ?? "HH:mm:ss";
+            float  fontPx    = GetFirstFloat(settings, 120f, "fontPx", "fontSize");
+            float  scale     = GetFirstFloat(settings, 1.0f, "scale");
+            string anchor    = (GetString(settings, "anchor") ?? AnchorFromPosition(GetString(settings, "position")) ?? "top-right").ToLowerInvariant();
+            int    offX      = (int)(GetFirstFloat(settings, 0f, "offsetX", "margin")); // margin handled below
+            int    offY      = (int)(GetFirstFloat(settings, 0f, "offsetY", "margin"));
+
+            // font family/style like the widget uses
+            string fontFamily = GetString(settings, "fontFamily") ?? "Segoe UI";
+            string fontStyle  = GetString(settings, "fontStyle")  ?? "Bold";
+            var    style      = ParseFontStyle(fontStyle);
+
+            // If legacy only had "margin", translate it to offsets *inward* for the anchor
+            if (!(settings is JsonObject so && (so.ContainsKey("offsetX") || so.ContainsKey("offsetY"))))
+            {
+                if (settings is JsonObject o && o.TryGetPropertyValue("margin", out var marginNode) && marginNode is JsonValue marginVal)
+                {
+                    if (marginVal.TryGetValue<float>(out var marginF) || (marginVal.TryGetValue<string>(out var marginS) && float.TryParse(marginS, out marginF)))
+                    {
+                        var (dx, dy) = OffsetsFromMarginForAnchor((int)marginF, anchor);
+                        offX = dx; offY = dy;
+                    }
+                }
+            }
+
+            // Measure using same family/style as the widget (device px)
+            var text = DateTime.Now.ToString(fmt);
+            SizeF textSize;
+            using (var bmp = new Bitmap(1,1))
+            using (var g = Graphics.FromImage(bmp))
+            using (var f = new Font(fontFamily, Math.Max(8f, fontPx * scale), style, GraphicsUnit.Pixel))
+                textSize = g.MeasureString(text, f);
+
+            var bounds = s.Bounds;
+            float x, y;
+            switch (anchor)
+            {
+                case "top-left":      x = 0;                      y = 0;                        break;
+                case "top-right":     x = bounds.Width - textSize.Width;  y = 0;                 break;
+                case "bottom-left":   x = 0;                      y = bounds.Height - textSize.Height; break;
+                case "bottom-right":  x = bounds.Width - textSize.Width;  y = bounds.Height - textSize.Height; break;
+                case "center":        x = (bounds.Width - textSize.Width)/2f; y = (bounds.Height - textSize.Height)/2f; break;
+                default:              x = bounds.Width - textSize.Width;    y = 0;               break;
+            }
+            x += offX; y += offY;
+
+            float nx = Clamp01((float)x / Math.Max(1, bounds.Width));
+            float ny = Clamp01((float)y / Math.Max(1, bounds.Height));
+            float nw = Clamp01((float)textSize.Width  / Math.Max(1, bounds.Width));
+            float nh = Clamp01((float)textSize.Height / Math.Max(1, bounds.Height));
+
+            nw = Math.Max(0.01f, nw);
+            nh = Math.Max(0.01f, nh);
+            if (nx + nw > 1f) nx = 1f - nw;
+            if (ny + nh > 1f) ny = 1f - nh;
+
+            return new RectangleF(nx, ny, nw, nh);
+
+            // local helpers:
+            static string AnchorFromPosition(string? pos) => pos?.Trim().ToLowerInvariant() switch
+            {
+                "upperleft" or "topleft"     => "top-left",
+                "upperright" or "topright"   => "top-right",
+                "lowerleft" or "bottomleft"  => "bottom-left",
+                "lowerright" or "bottomright"=> "bottom-right",
+                "center"                     => "center",
+                _                            => "top-right"
+            };
+            static FontStyle ParseFontStyle(string s)
+            {
+                FontStyle fs = 0;
+                foreach (var part in s.Split(new[]{',','|',';'}, StringSplitOptions.RemoveEmptyEntries))
+                    if (Enum.TryParse<FontStyle>(part.Trim(), true, out var one)) fs |= one;
+                return fs == 0 ? FontStyle.Regular : fs;
+            }
+            static (int, int) OffsetsFromMarginForAnchor(int margin, string anch) => anch switch
+            {
+                "top-left"      => ( margin,  margin),
+                "top-right"     => (-margin,  margin),
+                "bottom-left"   => ( margin, -margin),
+                "bottom-right"  => (-margin, -margin),
+                "center"        => (0,0),
+                _               => (-margin,  margin)
+            };
+        }
+
+
         private static Color ColorFromName(string name)
         {
             unchecked
@@ -641,7 +652,6 @@ namespace Cronator
             public ISettingsTab Instance { get; init; } = default!;
             public System.Reflection.Assembly Assembly { get; init; } = default!;
         }
-
 
         private sealed class ReflectionTabAdapter : ISettingsTab
         {
@@ -750,7 +760,7 @@ namespace Cronator
                         FolderName = fname,
                         Manifest = manifest,
                         Instance = inst,
-                        Assembly = asm,                   // << store the tab DLL assembly here
+                        Assembly = asm,
                     });
 
                     var title = inst.Title ?? manifest.displayName ?? manifest.name ?? fname;
@@ -773,7 +783,6 @@ namespace Cronator
             if (Tabs.Count == 0) Console.WriteLine("[Tabs] none loaded.");
         }
 
-
         private static Type? AutoDetectTabType(Assembly asm)
         {
             try
@@ -784,9 +793,9 @@ namespace Cronator
                     if (typeof(ISettingsTab).IsAssignableFrom(t)) return t;
 
                     // Duck-type fallback: Id (string), Title (string), CreateControl(): Control
-                    var idProp = t.GetProperty("Id", BindingFlags.Instance | BindingFlags.Public);
+                    var idProp    = t.GetProperty("Id", BindingFlags.Instance | BindingFlags.Public);
                     var titleProp = t.GetProperty("Title", BindingFlags.Instance | BindingFlags.Public);
-                    var cc = t.GetMethod("CreateControl", BindingFlags.Instance | BindingFlags.Public, new Type[0]);
+                    var cc        = t.GetMethod("CreateControl", BindingFlags.Instance | BindingFlags.Public, new Type[0]);
 
                     if (idProp?.PropertyType == typeof(string) &&
                         titleProp?.PropertyType == typeof(string) &&

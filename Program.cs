@@ -939,6 +939,12 @@ namespace Cronator
 
                         string widgetName = manifest.name ?? name;
                         var adapter = new ReflectedWidgetAdapter(inst, widgetName);
+
+                        // Context for live placement lookups:
+                        string display = manifest.displayName ?? widgetName;
+                        effective["monitor"] = _monIndex;   // current monitor index
+                        effective["name"]    = display;     // e.g., "Clock" or folder/manifest name
+
                         adapter.ApplySettings(effective);
                         _widgets.Add(adapter);
 
