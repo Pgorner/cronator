@@ -31,16 +31,16 @@ namespace Cronator
         [DllImport("user32.dll", SetLastError = true)]
         private static extern bool DestroyIcon(IntPtr hIcon);
 
+        public static bool IsTrayThread => _ui != null && Thread.CurrentThread == _ui;
+
         // ---------------------------- PUBLIC API ----------------------------
 
-        /// <summary>
-        /// Start tray icon thread. Pass an .ico path (static) and/or a .gif path (animated).
-        /// If both are null, uses a generated green dot.
-        /// </summary>
         internal static void Start(string? icoPath = null, string? gifPath = null, int gifFps = 8)
         {
             if (_started) return;
             _started = true;
+
+            var ready = new ManualResetEventSlim(false);
 
             _ui = new Thread(() =>
             {
@@ -49,11 +49,9 @@ namespace Cronator
                     Application.EnableVisualStyles();
                     Application.SetCompatibleTextRenderingDefault(false);
 
-                    // install a WindowsForms sync context for this thread
                     _ctx = new WindowsFormsSynchronizationContext();
                     SynchronizationContext.SetSynchronizationContext(_ctx);
 
-                    // Context menu
                     var menu = new ContextMenuStrip();
                     var settingsItem = new ToolStripMenuItem("Settings", null, (_, __) => ShowSettings());
                     var toggleAnim   = new ToolStripMenuItem("Toggle Animation", null, (_, __) =>
@@ -72,12 +70,11 @@ namespace Cronator
                     menu.Items.Add(new ToolStripSeparator());
                     menu.Items.Add(exitItem);
 
-                    // Create icon
                     Icon baseIcon;
                     if (!string.IsNullOrWhiteSpace(icoPath) && File.Exists(icoPath))
                         baseIcon = new Icon(icoPath);
                     else
-                        baseIcon = CreateColoredDotIcon(Color.LimeGreen); // tiny, generated
+                        baseIcon = CreateColoredDotIcon(Color.LimeGreen);
 
                     _icon = new NotifyIcon
                     {
@@ -87,12 +84,8 @@ namespace Cronator
                         ContextMenuStrip = menu
                     };
 
-                    _icon.MouseClick += (_, e) =>
-                    {
-                        if (e.Button == MouseButtons.Left) ShowSettings();
-                    };
+                    _icon.MouseClick += (_, e) => { if (e.Button == MouseButtons.Left) ShowSettings(); };
 
-                    // Optional: auto-start GIF if provided
                     if (!string.IsNullOrWhiteSpace(gifPath) && File.Exists(gifPath))
                         StartGifAnimationFromFile(gifPath!, gifFps);
 
@@ -100,8 +93,8 @@ namespace Cronator
                     _icon.BalloonTipText = "Running. Right-click for Settings or Exit.";
                     _icon.ShowBalloonTip(2000);
 
-                    // Controllable message loop
                     _appCtx = new ApplicationContext();
+                    ready.Set();
                     Application.Run(_appCtx);
                 }
                 catch (Exception ex)
@@ -119,16 +112,15 @@ namespace Cronator
             _ui.SetApartmentState(ApartmentState.STA);
             _ui.IsBackground = true;
             _ui.Start();
+            ready.Wait();
         }
 
-        /// <summary>
-        /// Start using embedded resources. resource names are like "Cronator.Assets.cronator.ico".
-        /// Pass null to skip.
-        /// </summary>
         internal static void StartFromEmbedded(string? icoResource = null, string? gifResource = null, int gifFps = 8)
         {
             if (_started) return;
             _started = true;
+
+            var ready = new ManualResetEventSlim(false);
 
             _ui = new Thread(() =>
             {
@@ -140,7 +132,6 @@ namespace Cronator
                     _ctx = new WindowsFormsSynchronizationContext();
                     SynchronizationContext.SetSynchronizationContext(_ctx);
 
-                    // Context menu
                     var menu = new ContextMenuStrip();
                     var settingsItem = new ToolStripMenuItem("Settings", null, (_, __) => ShowSettings());
                     var toggleAnim   = new ToolStripMenuItem("Toggle Animation", null, (_, __) =>
@@ -159,7 +150,6 @@ namespace Cronator
                     menu.Items.Add(new ToolStripSeparator());
                     menu.Items.Add(exitItem);
 
-                    // Base icon: embedded .ico or generated dot
                     Icon baseIcon;
                     if (!string.IsNullOrWhiteSpace(icoResource))
                     {
@@ -179,12 +169,8 @@ namespace Cronator
                         ContextMenuStrip = menu
                     };
 
-                    _icon.MouseClick += (_, e) =>
-                    {
-                        if (e.Button == MouseButtons.Left) ShowSettings();
-                    };
+                    _icon.MouseClick += (_, e) => { if (e.Button == MouseButtons.Left) ShowSettings(); };
 
-                    // Optional: auto-start GIF from embedded resource
                     if (!string.IsNullOrWhiteSpace(gifResource))
                         StartGifAnimationFromResource(gifResource!, gifFps);
 
@@ -193,6 +179,7 @@ namespace Cronator
                     _icon.ShowBalloonTip(2000);
 
                     _appCtx = new ApplicationContext();
+                    ready.Set();
                     Application.Run(_appCtx);
                 }
                 catch (Exception ex)
@@ -210,71 +197,141 @@ namespace Cronator
             _ui.SetApartmentState(ApartmentState.STA);
             _ui.IsBackground = true;
             _ui.Start();
+            ready.Wait();
         }
 
-        /// <summary>
-        /// Cleanly stop the tray thread and message loop, then join the thread.
-        /// </summary>
+        /// <summary>Cleanly stop the tray thread and message loop, then join the thread.</summary>
         internal static void Stop()
         {
+            // If we’re *on* the tray thread, do inline shutdown (no Join on ourselves)
+            if (IsTrayThread)
+            {
+                try
+                {
+                    try
+                    {
+                        foreach (Form f in Application.OpenForms)
+                            if (f is SettingsForm) f.Close();
+                    }
+                    catch { }
+
+                    try { StopGifAnimation(); } catch { }
+
+                    try
+                    {
+                        if (_icon != null)
+                        {
+                            _icon.Visible = false;
+                            _icon.Dispose();
+                            _icon = null;
+                        }
+                    }
+                    catch { }
+
+                    try { _appCtx?.ExitThread(); } catch { }
+                }
+                finally
+                {
+                    // final safety for unmanaged HICONs
+                    try
+                    {
+                        lock (_hiconLock)
+                        {
+                            foreach (var h in _ownedHicons) { try { DestroyIcon(h); } catch { } }
+                            _ownedHicons.Clear();
+                        }
+                    }
+                    catch { }
+
+                    _appCtx = null;
+                    _ctx = null;
+                    _started = false;
+                    // Do NOT touch _ui/join here; we *are* that thread and ExitThread() will unwind it.
+                }
+                return;
+            }
+
+            // Normal path: marshal to UI thread and then Join it
             try
             {
-                // Marshal all UI cleanup to the tray thread
                 if (_ctx != null)
                 {
                     _ctx.Post(_ =>
                     {
                         try
                         {
-                            // close any settings forms opened from tray
                             foreach (Form f in Application.OpenForms)
                                 if (f is SettingsForm) f.Close();
                         }
                         catch { }
 
-                        try
-                        {
-                            // Stop animation on UI thread (timer lives there)
-                            StopGifAnimation();
-                        }
-                        catch { }
+                        try { StopGifAnimation(); } catch { }
 
                         try
                         {
-                            // Ask the message loop to exit
-                            _appCtx?.ExitThread();
+                            if (_icon != null)
+                            {
+                                _icon.Visible = false;
+                                _icon.Dispose();
+                                _icon = null;
+                            }
                         }
                         catch { }
+
+                        try { _appCtx?.ExitThread(); } catch { }
                     }, null);
+                }
+                else
+                {
+                    try { StopGifAnimation(); } catch { }
+                    try
+                    {
+                        if (_icon != null)
+                        {
+                            _icon.Visible = false;
+                            _icon.Dispose();
+                            _icon = null;
+                        }
+                    }
+                    catch { }
                 }
             }
             catch { }
 
-            // Wait for the UI thread to terminate so the process can exit
             try
             {
                 if (_ui != null && _ui.IsAlive)
-                    _ui.Join(1500);
+                {
+                    if (!_ui.Join(3000))
+                        Console.WriteLine("[Tray] UI thread did not exit in time.");
+                }
             }
             catch { }
 
+            try
+            {
+                lock (_hiconLock)
+                {
+                    foreach (var h in _ownedHicons) { try { DestroyIcon(h); } catch { } }
+                    _ownedHicons.Clear();
+                }
+            }
+            catch { }
+
+            _appCtx = null;
+            _ctx = null;
+            _ui = null;
             _started = false;
         }
 
-        /// <summary>Swap to a static icon from file at runtime.</summary>
         internal static void SetStaticIconFromFile(string path)
         {
             if (_icon == null || string.IsNullOrWhiteSpace(path) || !File.Exists(path)) return;
             StopGifAnimation();
-            try
-            {
-                using var ico = new Icon(path);
-                _icon.Icon = (Icon)ico.Clone();
-            }
+            try { using var ico = new Icon(path); _icon.Icon = (Icon)ico.Clone(); }
             catch (Exception ex) { Console.WriteLine("[Tray] SetStaticIconFromFile error: " + ex.Message); }
         }
 
-        /// <summary>Swap to a static icon from embedded resource at runtime.</summary>
         internal static void SetStaticIconFromResource(string resourceName)
         {
             if (_icon == null || string.IsNullOrWhiteSpace(resourceName)) return;
@@ -289,16 +346,15 @@ namespace Cronator
             catch (Exception ex) { Console.WriteLine("[Tray] SetStaticIconFromResource error: " + ex.Message); }
         }
 
-        /// <summary>Regenerate the small colored dot icon (e.g., to reflect selected color).</summary>
         internal static void SetColoredDotIcon(Color color)
         {
             if (_icon == null) return;
             StopGifAnimation();
             var ico = CreateColoredDotIcon(color);
-            _icon.Icon = ico; // NotifyIcon owns it; we'll destroy on Stop()
+            _icon.Icon = ico;
         }
 
-        // --------------------- GIF animation (file or resource) ---------------------
+        // --------------------- GIF animation ---------------------
 
         internal static void StartGifAnimationFromFile(string gifPath, int fps = 8)
         {
@@ -318,14 +374,14 @@ namespace Cronator
 
         private static void StartGifAnimationFromImage(Image gif, int fps)
         {
-            StopGifAnimation(); // ensure clean state
+            StopGifAnimation();
             try
             {
                 var fd = new FrameDimension(gif.FrameDimensionsList[0]);
                 int count = gif.GetFrameCount(fd);
                 if (count <= 0) return;
 
-                int target = 16; // tray sizes are tiny; 16px looks crisp
+                int target = 16;
                 var frames = new Icon[count];
 
                 for (int i = 0; i < count; i++)
@@ -338,16 +394,16 @@ namespace Cronator
                         g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
                         g.DrawImage(gif, new Rectangle(0, 0, target, target));
                     }
-                    IntPtr hIcon = bmp.GetHicon();         // unmanaged handle
+                    IntPtr hIcon = bmp.GetHicon();
                     lock (_hiconLock) _ownedHicons.Add(hIcon);
-                    frames[i] = Icon.FromHandle(hIcon);    // wrap for NotifyIcon
+                    frames[i] = Icon.FromHandle(hIcon);
                 }
 
                 _animFrames = frames;
                 _animIndex = 0;
 
                 _animTimer = new System.Windows.Forms.Timer();
-                _animTimer.Interval = Math.Max(50, 1000 / Math.Max(1, fps)); // sensible minimum
+                _animTimer.Interval = Math.Max(50, 1000 / Math.Max(1, fps));
                 _animTimer.Tick += (_, __) =>
                 {
                     if (_icon == null || _animFrames == null || _animFrames.Length == 0) return;
@@ -363,7 +419,6 @@ namespace Cronator
             }
         }
 
-        /// <summary>Stop animation and free frame icons. Must run on the tray thread.</summary>
         internal static void StopGifAnimation()
         {
             try
@@ -371,22 +426,15 @@ namespace Cronator
                 if (_animTimer != null) { _animTimer.Stop(); _animTimer.Dispose(); _animTimer = null; }
                 if (_animFrames != null)
                 {
-                    foreach (var ico in _animFrames)
-                    {
-                        try { ico.Dispose(); } catch { }
-                    }
+                    foreach (var ico in _animFrames) { try { ico.Dispose(); } catch { } }
                     _animFrames = null;
                 }
             }
             catch { }
 
-            // Destroy unmanaged HICONs we created
             lock (_hiconLock)
             {
-                foreach (var h in _ownedHicons)
-                {
-                    try { DestroyIcon(h); } catch { }
-                }
+                foreach (var h in _ownedHicons) { try { DestroyIcon(h); } catch { } }
                 _ownedHicons.Clear();
             }
         }
@@ -400,14 +448,10 @@ namespace Cronator
                 foreach (Form f in Application.OpenForms)
                     if (f is SettingsForm) { f.Activate(); return; }
 
-                // Requires a parameterless SettingsForm() overload (you added one earlier).
                 var form = new SettingsForm();
                 form.Show();
             }
-            catch (Exception ex)
-            {
-                Console.WriteLine("[Tray] ShowSettings error: " + ex.Message);
-            }
+            catch (Exception ex) { Console.WriteLine("[Tray] ShowSettings error: " + ex.Message); }
         }
 
         private static void CleanupIcon()
@@ -423,12 +467,9 @@ namespace Cronator
             }
             catch { }
 
-            // StopGifAnimation must have run on UI thread before ExitThread;
-            // here we only ensure unmanaged handles list is empty as a fallback.
             try { StopGifAnimation(); } catch { }
         }
 
-        /// <summary>Create a tiny 16x16 colored dot icon.</summary>
         private static Icon CreateColoredDotIcon(Color color)
         {
             var bmp = new Bitmap(16, 16);
@@ -439,17 +480,14 @@ namespace Cronator
                 g.FillEllipse(b, 2, 2, 12, 12);
                 g.DrawEllipse(Pens.Black, 2, 2, 12, 12);
             }
-            var hIcon = bmp.GetHicon(); // unmanaged; tracked in list
+            var hIcon = bmp.GetHicon();
             lock (_hiconLock) _ownedHicons.Add(hIcon);
             return Icon.FromHandle(hIcon);
         }
 
         private static Stream? OpenResourceStream(string resourceName)
         {
-            try
-            {
-                return Assembly.GetExecutingAssembly().GetManifestResourceStream(resourceName);
-            }
+            try { return Assembly.GetExecutingAssembly().GetManifestResourceStream(resourceName); }
             catch { return null; }
         }
     }

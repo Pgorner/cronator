@@ -5,8 +5,8 @@ using System.Drawing;
 using System.IO;
 using System.Linq;
 using System.Reflection;
-using System.Windows.Forms;
 using System.Text.Json;
+using System.Windows.Forms;
 
 namespace Cronator
 {
@@ -24,10 +24,10 @@ namespace Cronator
         private readonly TreeView _nav;
         private readonly Panel _contentHost;
 
-        private readonly List<WidgetInfo> _widgets; // still available for tabs that want it
+        private readonly List<WidgetInfo> _widgets; // available for any tabs that want it
         private Control? _currentPage;
 
-        // NEW: dynamic tabs
+        // dynamic tabs
         private readonly TabManager _tabs = new();
 
         public SettingsForm() : this(new List<WidgetInfo>()) { }
@@ -63,26 +63,8 @@ namespace Cronator
             _contentHost = new Panel { Dock = DockStyle.Fill, BackColor = SystemColors.Window };
             _split.Panel2.Controls.Add(_contentHost);
 
-            // Load tabs from disk
             BuildNavFromTabs();
         }
-
-        // add near the top of SettingsForm.cs
-        private static string? FindTabAssembly(string tabFolder, string assemblyFileName)
-        {
-            var candidates = new[]
-            {
-                Path.Combine(tabFolder, assemblyFileName),                         // assets/settingstabs/<tab>/MonitorsTab.dll
-                Path.Combine(tabFolder, "net8.0-windows", assemblyFileName),       // assets/settingstabs/<tab>/net8.0-windows/MonitorsTab.dll
-                Path.Combine(AppDomain.CurrentDomain.BaseDirectory, assemblyFileName) // bin\<cfg>\net8.0-windows\MonitorsTab.dll (fallback)
-            };
-
-            foreach (var p in candidates)
-                if (File.Exists(p)) return p;
-
-            return null;
-        }
-
 
         private void BuildNavFromTabs()
         {
@@ -93,13 +75,18 @@ namespace Cronator
                 string root = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "assets", "settingstabs");
                 _tabs.LoadFromFolder(root);
 
+                // Try to inject live monitor snapshots into Monitors tab types (if loaded)
+                TryInjectMonitorsProviderIfAvailable();
+
                 foreach (var t in _tabs.Tabs)
                 {
-                    // Only show tabs that actually loaded
-                    var node = new TreeNode(t.Instance.Title ?? t.Manifest.displayName ?? t.Manifest.name ?? t.FolderName)
-                    {
-                        Tag = t
-                    };
+                    var title = t.Instance?.Title
+                                ?? t.Manifest.displayName
+                                ?? t.Manifest.name
+                                ?? t.FolderName
+                                ?? "Tab";
+
+                    var node = new TreeNode(title) { Tag = t };
                     _nav.Nodes.Add(node);
                 }
 
@@ -111,7 +98,6 @@ namespace Cronator
                 }
                 else
                 {
-                    // No tabs found: show a friendly placeholder
                     ShowPage(new PlaceholderPage("No settings tabs found in assets/settingstabs."));
                 }
             }
@@ -124,6 +110,9 @@ namespace Cronator
 
         private void Nav_AfterSelect(object? sender, TreeViewEventArgs e)
         {
+            // Try again here in case assembly was loaded after BuildNavFromTabs
+            TryInjectMonitorsProviderIfAvailable();
+
             var node = e.Node;
             if (node?.Tag is not TabManager.TabHandle handle)
             {
@@ -134,15 +123,51 @@ namespace Cronator
             try
             {
                 var ctrl = handle.Instance.CreateControl() ?? new PlaceholderPage("Tab has no content.");
-                // Optional: Provide shared context to tabs via Tag or service locator:
-                // ctrl.Tag = new { Widgets = _widgets };
-
                 ShowPage(ctrl);
             }
             catch (Exception ex)
             {
                 Console.WriteLine($"[Tabs] create control error for '{handle.Manifest.name}': {ex.Message}");
                 ShowPage(new PlaceholderPage("Failed to create tab UI."));
+            }
+        }
+
+
+        /// <summary>
+        /// Sets Cronator.SettingsTabs.Monitors.MonitorsTab.SnapshotProvider (if present)
+        /// on the assembly that defines the selected tab.
+        /// </summary>
+        private void EnsureMonitorsSnapshotProvider(TabManager.TabHandle handle)
+        {
+            try
+            {
+                var asm = handle.Instance?.GetType().Assembly;
+                if (asm == null) return;
+
+                var tabType     = asm.GetType("Cronator.SettingsTabs.Monitors.MonitorsTab");
+                var snapType    = asm.GetType("Cronator.SettingsTabs.Monitors.MonitorSnapshot");
+                var widgetBoxTy = asm.GetType("Cronator.SettingsTabs.Monitors.WidgetBox");
+                if (tabType == null || snapType == null || widgetBoxTy == null) return;
+
+                var listSnapType = typeof(List<>).MakeGenericType(snapType);
+                var funcType     = typeof(Func<>).MakeGenericType(listSnapType);
+
+                var method = typeof(SettingsForm).GetMethod(
+                    nameof(BuildMonitorSnapshotsObjects),
+                    BindingFlags.NonPublic | BindingFlags.Static
+                )!;
+                var generic = method.MakeGenericMethod(snapType, widgetBoxTy);
+
+                // Build a compatible Func<List<MonitorSnapshot>> for the tab’s types.
+                var del = generic.CreateDelegate(funcType);
+
+                var prop = tabType.GetProperty("SnapshotProvider",
+                    BindingFlags.Public | BindingFlags.Static);
+                prop?.SetValue(null, del);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine("[Tabs] EnsureMonitorsSnapshotProvider error: " + ex.Message);
             }
         }
 
@@ -157,6 +182,345 @@ namespace Cronator
             _currentPage = page;
             page.Dock = DockStyle.Fill;
             _contentHost.Controls.Add(page);
+        }
+
+        // ======================== Monitors snapshot injection ========================
+
+        /// <summary>
+        /// If the Monitors tab assembly is loaded, set its static SnapshotProvider (via reflection)
+        /// to a delegate that returns the actual, current widget placements normalized per monitor.
+        /// </summary>
+
+        private void TryInjectMonitorsProviderIfAvailable()
+        {
+            try
+            {
+                // Scan every loaded tab assembly for a public static property named "SnapshotProvider"
+                // whose type is Func<List<SomeMonitorSnapshotType>>. When found, we build a delegate
+                // that returns List<ThatType> using our BuildMonitorSnapshotsObjects<TSnap,TBox>().
+                foreach (var h in _tabs.Tabs)
+                {
+                    var asm = h.Instance?.GetType()?.Assembly;
+                    if (asm == null) continue;
+
+                    // Prefer known types (MonitorsInterop, MonitorsTab) first for clearer logs
+                    var knownTypes = new[]
+                    {
+                        asm.GetType("Cronator.SettingsTabs.Monitors.MonitorsInterop"),
+                        asm.GetType("Cronator.SettingsTabs.Monitors.MonitorsTab")
+                    }.Where(t => t != null).ToArray();
+
+                    IEnumerable<Type> exportedPlusKnown = knownTypes.Length > 0
+                        ? knownTypes.Concat(asm.GetExportedTypes().Where(t => !knownTypes.Contains(t)))
+                        : asm.GetExportedTypes();
+
+                    var candidateProps = exportedPlusKnown
+                        .SelectMany(t => t.GetProperties(BindingFlags.Public | BindingFlags.Static))
+                        .Where(p => string.Equals(p.Name, "SnapshotProvider", StringComparison.Ordinal))
+                        .ToList();
+
+                    foreach (var prop in candidateProps)
+                    {
+                        var propType = prop.PropertyType;
+                        if (!propType.IsGenericType) continue;
+
+                        // Must be Func<...>
+                        if (propType.GetGenericTypeDefinition() != typeof(Func<>)) continue;
+
+                        // Return type must be List<TSnapshot>
+                        var retType = propType.GetGenericArguments()[0];
+                        if (!retType.IsGenericType || retType.GetGenericTypeDefinition() != typeof(List<>)) continue;
+
+                        var snapType = retType.GetGenericArguments()[0]; // TSnapshot
+                        if (snapType == null) continue;
+
+                        // Find the WidgetBox type in the same namespace/assembly as the snapshot
+                        // (the Monitors tab project defines both)
+                        var wbType = asm.GetExportedTypes().FirstOrDefault(t =>
+                            t.Namespace == snapType.Namespace && t.Name == "WidgetBox");
+
+                        if (wbType == null)
+                        {
+                            // Try a looser search just in case
+                            wbType = asm.GetExportedTypes().FirstOrDefault(t => t.Name == "WidgetBox");
+                        }
+
+                        if (wbType == null) continue; // can't build without WidgetBox
+
+                        // Build a closed generic method: BuildMonitorSnapshotsObjects<TSnapshot, WidgetBox>()
+                        var buildMethod = typeof(SettingsForm).GetMethod(
+                            nameof(BuildMonitorSnapshotsObjects),
+                            BindingFlags.NonPublic | BindingFlags.Static);
+
+                        if (buildMethod == null) continue;
+
+                        var closedBuilder = buildMethod.MakeGenericMethod(snapType, wbType);
+
+                        // The closedBuilder signature is: static List<TSnapshot> Method()
+                        // We need a delegate of type: Func<List<TSnapshot>>
+                        var del = Delegate.CreateDelegate(propType, closedBuilder);
+
+                        // Set the static property
+                        prop.SetValue(null, del);
+                        Console.WriteLine($"[Tabs] monitors: SnapshotProvider injected on {prop.DeclaringType?.FullName}.");
+                        return; // injected once is enough
+                    }
+                }
+
+                // If we get here, we didn’t find a property to set.
+                Console.WriteLine("[Tabs] monitors: SnapshotProvider property not found to inject.");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine("[Tabs] monitors provider inject error: " + ex);
+            }
+        }
+
+
+        /// <summary>
+        /// Builds List&lt;TMonitorSnapshot&gt; where TMonitorSnapshot, TWidgetBox are the types from the MonitorsTab assembly.
+        /// Uses current Screen.AllScreens and widget configs under assets/widgets.
+        /// </summary>
+        private static List<TMonitorSnapshot> BuildMonitorSnapshotsObjects<TMonitorSnapshot, TWidgetBox>()
+            where TMonitorSnapshot : class
+            where TWidgetBox : class
+        {
+            var list = new List<TMonitorSnapshot>();
+            var screens = Screen.AllScreens;
+
+            // Prepare reflection handles
+            var snType = typeof(TMonitorSnapshot);
+            var wbType = typeof(TWidgetBox);
+
+            var snBoundsProp = snType.GetProperty("Bounds")!;
+            var snLabelProp = snType.GetProperty("Label")!;
+            var snIsPrimaryProp = snType.GetProperty("IsPrimary")!;
+            var snIndexProp = snType.GetProperty("Index")!;
+            var snWidgetsProp = snType.GetProperty("Widgets")!; // List<WidgetBox>
+
+            var wbRectProp = wbType.GetProperty("RectNorm")!;
+            var wbNameProp = wbType.GetProperty("Name")!;
+            var wbColorProp = wbType.GetProperty("Color")!;
+            var wbEnabledProp = wbType.GetProperty("Enabled")!;
+
+            // Build placements from disk
+            var placements = ReadWidgetPlacements(screens);
+
+            for (int i = 0; i < screens.Length; i++)
+            {
+                var s = screens[i];
+                var snap = Activator.CreateInstance<TMonitorSnapshot>();
+
+                snBoundsProp.SetValue(snap, s.Bounds);
+                snLabelProp.SetValue(snap, $"{s.Bounds.Width}×{s.Bounds.Height}" + (s.Primary ? " (Primary)" : ""));
+                snIsPrimaryProp.SetValue(snap, s.Primary);
+                snIndexProp.SetValue(snap, i);
+
+                // Create strongly-typed List<WidgetBox>
+                var listWb = (System.Collections.IList)Activator.CreateInstance(typeof(List<>).MakeGenericType(wbType))!;
+
+                if (placements.TryGetValue(i, out var ws))
+                {
+                    foreach (var p in ws)
+                    {
+                        var wb = Activator.CreateInstance<TWidgetBox>();
+                        wbRectProp.SetValue(wb, p.RectNorm);
+                        wbNameProp.SetValue(wb, p.Name);
+                        wbColorProp.SetValue(wb, p.Color);
+                        wbEnabledProp.SetValue(wb, p.Enabled);
+                        listWb.Add(wb);
+                    }
+                }
+
+                snWidgetsProp.SetValue(snap, listWb);
+                list.Add(snap);
+            }
+
+            return list;
+        }
+
+        // Deserialized, engine-agnostic widget placement
+        private sealed class Placement
+        {
+            public RectangleF RectNorm;
+            public string Name = "Widget";
+            public bool Enabled = true;
+            public Color Color = Color.SteelBlue;
+        }
+
+        /// <summary>
+        /// Read widgets under assets/widgets/*, combine manifest + config.user.json,
+        /// decide monitor index and normalized rectangle (nx,ny,nw,nh or pixel fallback).
+        /// </summary>
+        private static Dictionary<int, List<Placement>> ReadWidgetPlacements(Screen[] screens)
+        {
+            var root = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "assets", "widgets");
+            var map = new Dictionary<int, List<Placement>>();
+
+            if (!Directory.Exists(root)) return map;
+
+            foreach (var dir in Directory.EnumerateDirectories(root))
+            {
+                try
+                {
+                    var manifestPath = Path.Combine(dir, "manifest.json");
+                    var userPath = Path.Combine(dir, "config.user.json");
+
+                    string displayName = Path.GetFileName(dir);
+                    bool enabled = false;
+
+                    JsonElement? settings = null;
+
+                    // Manifest (for name + default enabled?)
+                    if (File.Exists(manifestPath))
+                    {
+                        using var j = JsonDocument.Parse(File.ReadAllText(manifestPath));
+                        var ro = j.RootElement;
+
+                        if (ro.TryGetProperty("displayName", out var dn) && dn.ValueKind == JsonValueKind.String)
+                            displayName = dn.GetString() ?? displayName;
+
+                        if (ro.TryGetProperty("enabled", out var en) && (en.ValueKind == JsonValueKind.True || en.ValueKind == JsonValueKind.False))
+                            enabled = en.GetBoolean();
+                    }
+
+                    // User config overrides enable + settings
+                    if (File.Exists(userPath))
+                    {
+                        using var j = JsonDocument.Parse(File.ReadAllText(userPath));
+                        var ro = j.RootElement;
+
+                        if (ro.TryGetProperty("enabled", out var en) && (en.ValueKind == JsonValueKind.True || en.ValueKind == JsonValueKind.False))
+                            enabled = en.GetBoolean();
+
+                        if (ro.TryGetProperty("settings", out var set))
+                            settings = set;
+                    }
+
+                    if (!enabled) continue; // only show enabled widgets
+
+                    // Determine monitor index (monitor|screen|display)
+                    int mon = 0;
+                    if (TryGetInt(settings, "monitor", out var m0)) mon = m0;
+                    else if (TryGetInt(settings, "screen", out var m1)) mon = m1;
+                    else if (TryGetInt(settings, "display", out var m2)) mon = m2;
+
+                    if (mon < 0 || mon >= screens.Length) mon = 0;
+
+                    // Determine rectangle
+                    RectangleF rectN = new RectangleF(0.05f, 0.05f, 0.20f, 0.12f); // sensible default
+
+                    // Prefer normalized if present (nx,ny,nw,nh)
+                    bool hasNorm =
+                        TryGetFloat(settings, "nx", out var nx) |
+                        TryGetFloat(settings, "ny", out var ny) |
+                        TryGetFloat(settings, "nw", out var nw) |
+                        TryGetFloat(settings, "nh", out var nh);
+
+                    if (hasNorm)
+                    {
+                        rectN = new RectangleF(
+                            Clamp01(nx.GetValueOrDefault(0.05f)),
+                            Clamp01(ny.GetValueOrDefault(0.05f)),
+                            Clamp01(nw.GetValueOrDefault(0.20f)),
+                            Clamp01(nh.GetValueOrDefault(0.12f)));
+                    }
+                    else
+                    {
+                        // Try pixel coords (x,y,w,h) or (left,top,width,height)
+                        var s = screens[mon].Bounds;
+                        float xPx = GetFirstFloat(settings, "x", "left").GetValueOrDefault(s.X + s.Width * 0.05f);
+                        float yPx = GetFirstFloat(settings, "y", "top").GetValueOrDefault(s.Y + s.Height * 0.05f);
+                        float wPx = GetFirstFloat(settings, "w", "width").GetValueOrDefault(s.Width * 0.20f);
+                        float hPx = GetFirstFloat(settings, "h", "height").GetValueOrDefault(s.Height * 0.12f);
+
+                        rectN = new RectangleF(
+                            Clamp01((xPx - s.Left) / Math.Max(1, s.Width)),
+                            Clamp01((yPx - s.Top) / Math.Max(1, s.Height)),
+                            Clamp01(wPx / Math.Max(1, s.Width)),
+                            Clamp01(hPx / Math.Max(1, s.Height)));
+                    }
+
+                    rectN = NormalizeRect(rectN);
+
+                    var p = new Placement
+                    {
+                        RectNorm = rectN,
+                        Name = displayName,
+                        Enabled = true,
+                        Color = ColorFromName(displayName)
+                    };
+
+                    if (!map.TryGetValue(mon, out var lst))
+                        map[mon] = lst = new List<Placement>();
+                    lst.Add(p);
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine("[MonitorsTab Placement] " + ex.Message);
+                }
+            }
+
+            return map;
+        }
+
+        private static float Clamp01(float v) => v < 0 ? 0 : (v > 1 ? 1 : v);
+        private static RectangleF NormalizeRect(RectangleF r)
+        {
+            float x = Clamp01(r.X);
+            float y = Clamp01(r.Y);
+            float w = Clamp01(r.Width);
+            float h = Clamp01(r.Height);
+
+            if (x + w > 1f) w = 1f - x;
+            if (y + h > 1f) h = 1f - y;
+
+            w = Math.Max(0.01f, w);
+            h = Math.Max(0.01f, h);
+            return new RectangleF(x, y, w, h);
+        }
+
+        private static bool TryGetInt(JsonElement? settings, string key, out int value)
+        {
+            value = 0;
+            if (settings is null || settings.Value.ValueKind != JsonValueKind.Object) return false;
+            if (!settings.Value.TryGetProperty(key, out var el)) return false;
+            if (el.ValueKind == JsonValueKind.Number && el.TryGetInt32(out var i)) { value = i; return true; }
+            if (el.ValueKind == JsonValueKind.String && int.TryParse(el.GetString(), out var j)) { value = j; return true; }
+            return false;
+        }
+
+        private static bool TryGetFloat(JsonElement? settings, string key, out float? value)
+        {
+            value = null;
+            if (settings is null || settings.Value.ValueKind != JsonValueKind.Object) return false;
+            if (!settings.Value.TryGetProperty(key, out var el)) return false;
+            if (el.ValueKind == JsonValueKind.Number) { value = el.GetSingle(); return true; }
+            if (el.ValueKind == JsonValueKind.String && float.TryParse(el.GetString(), out var f)) { value = f; return true; }
+            return false;
+        }
+
+        private static float? GetFirstFloat(JsonElement? settings, params string[] keys)
+        {
+            foreach (var k in keys)
+            {
+                if (TryGetFloat(settings, k, out var v) && v.HasValue) return v.Value;
+            }
+            return null;
+        }
+
+        private static Color ColorFromName(string name)
+        {
+            unchecked
+            {
+                int h = 23;
+                foreach (char c in name) h = h * 31 + c;
+                // Convert hash → pleasant color
+                int r = 160 + (Math.Abs(h) % 96);
+                int g = 120 + (Math.Abs(h >> 3) % 96);
+                int b = 140 + (Math.Abs(h >> 5) % 96);
+                return Color.FromArgb(r, g, b);
+            }
         }
     }
 
@@ -175,7 +539,7 @@ namespace Cronator
         }
     }
 
-    // ---------------- Tabs loader (mirrors your widget loader robustness) ----------------
+    // ---------------- Tabs loader ----------------
     internal sealed class TabManager
     {
         public readonly List<TabHandle> Tabs = new();
@@ -186,7 +550,7 @@ namespace Cronator
             public string? displayName { get; set; }   // e.g., "Monitors"
             public string? kind { get; set; }          // "dll"
             public string? assembly { get; set; }      // "MonitorsTab.dll"
-            public string? type { get; set; }          // "Cronator.Tabs.Monitors.MonitorsTab"
+            public string? type { get; set; }          // "Cronator.SettingsTabs.Monitors.MonitorsTab"
             public bool enabled { get; set; } = true;
         }
 
@@ -197,7 +561,6 @@ namespace Cronator
             public TabManifest Manifest { get; init; } = new();
             public ISettingsTab Instance { get; init; } = default!;
         }
-
 
         private sealed class ReflectionTabAdapter : ISettingsTab
         {
@@ -210,16 +573,16 @@ namespace Cronator
             {
                 _impl = impl;
                 var t = impl.GetType();
-                _id = t.GetProperty("Id")!;
-                _title = t.GetProperty("Title")!;
-                _create = t.GetMethod("CreateControl")!;
+                _id = t.GetProperty("Id") ?? throw new InvalidOperationException("Tab must expose Id property");
+                _title = t.GetProperty("Title") ?? throw new InvalidOperationException("Tab must expose Title property");
+                _create = t.GetMethod("CreateControl", BindingFlags.Public | BindingFlags.Instance)
+                          ?? throw new InvalidOperationException("Tab must expose CreateControl()");
             }
 
             public string Id => (string)(_id.GetValue(_impl) ?? "");
             public string Title => (string)(_title.GetValue(_impl) ?? "");
             public Control? CreateControl() => (Control?)_create.Invoke(_impl, null);
         }
-
 
         public void LoadFromFolder(string root)
         {
@@ -278,7 +641,7 @@ namespace Cronator
                         if (t == null)
                         {
                             Console.WriteLine($"[Tabs] {fname}: type not found in '{Path.GetFileName(asmPath)}': {manifest.type}");
-                            // fall through to auto-detect
+                            // fallthrough to auto-detect
                         }
                     }
 
@@ -298,11 +661,7 @@ namespace Cronator
 
                     var raw = Activator.CreateInstance(t);
                     ISettingsTab? inst = raw as ISettingsTab;
-                    if (inst == null)
-                    {
-                        // Wrap with adapter if duck-typed
-                        inst = new ReflectionTabAdapter(raw!);
-                    }
+                    if (inst == null) inst = new ReflectionTabAdapter(raw!);
 
                     Tabs.Add(new TabHandle
                     {
@@ -332,7 +691,6 @@ namespace Cronator
             if (Tabs.Count == 0) Console.WriteLine("[Tabs] none loaded.");
         }
 
-// inside TabManager
         private static Type? AutoDetectTabType(Assembly asm)
         {
             try
@@ -359,19 +717,15 @@ namespace Cronator
             return null;
         }
 
-
         private static bool TryResolveAssemblyPath(string folder, string asmRelativeOrName, out string fullPath)
         {
-            // 1) exact relative
             var candidate = Path.Combine(folder, asmRelativeOrName);
             if (File.Exists(candidate)) { fullPath = candidate; return true; }
 
-            // 2) search exact file recursively (handles net8.0-windows subfolder etc.)
             var fileName = Path.GetFileName(asmRelativeOrName);
             var found = Directory.GetFiles(folder, fileName, SearchOption.AllDirectories).FirstOrDefault();
             if (!string.IsNullOrEmpty(found)) { fullPath = found; return true; }
 
-            // 3) fallback: newest *.dll in folder tree
             var anyDll = Directory.GetFiles(folder, "*.dll", SearchOption.AllDirectories)
                                   .OrderByDescending(File.GetLastWriteTimeUtc)
                                   .FirstOrDefault();
@@ -384,16 +738,6 @@ namespace Cronator
 
             fullPath = string.Empty;
             return false;
-        }
-
-        public sealed class TabHandleComparer : IComparer<TabHandle>
-        {
-            public int Compare(TabHandle? x, TabHandle? y)
-            {
-                var sx = x?.Instance?.Title ?? x?.Manifest?.displayName ?? x?.Manifest?.name ?? x?.FolderName ?? "";
-                var sy = y?.Instance?.Title ?? y?.Manifest?.displayName ?? y?.Manifest?.name ?? y?.FolderName ?? "";
-                return StringComparer.OrdinalIgnoreCase.Compare(sx, sy);
-            }
         }
     }
 

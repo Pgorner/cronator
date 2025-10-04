@@ -223,6 +223,7 @@ namespace Cronator
                         StopTimer();
                         StopClockTimer();
                         TryRestore();
+                        Cronator.Tray.Stop();   // ensure tray loop is down in console exit too
                         Console.WriteLine("Restored. Bye.");
                         break;
                     }
@@ -680,12 +681,17 @@ namespace Cronator
         // ===== Tray hooks (minimal) =====
         internal static void TrayExitRequested()
         {
-            StopTimer();
-            StopClockTimer();
-            TryRestore();
-            Cronator.Tray.Stop();
-            Environment.Exit(0);
+            // Run restore + stop off the tray UI thread to avoid self-join deadlocks
+            ThreadPool.QueueUserWorkItem(_ =>
+            {
+                try { StopTimer(); } catch { }
+                try { StopClockTimer(); } catch { }
+                try { TryRestore(); } catch { }
+                try { Cronator.Tray.Stop(); } catch { }
+                Environment.Exit(0);
+            });
         }
+
 
         internal static string[] TrayGetMonitorList()
         {
