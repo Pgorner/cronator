@@ -7,6 +7,7 @@ using System.Linq;
 using System.Reflection;
 using System.Text.Json;
 using System.Windows.Forms;
+using System.Text.Json.Nodes;
 
 namespace Cronator
 {
@@ -137,11 +138,12 @@ namespace Cronator
         /// Sets Cronator.SettingsTabs.Monitors.MonitorsTab.SnapshotProvider (if present)
         /// on the assembly that defines the selected tab.
         /// </summary>
+        
         private void EnsureMonitorsSnapshotProvider(TabManager.TabHandle handle)
         {
             try
             {
-                var asm = handle.Instance?.GetType().Assembly;
+                var asm = handle.Assembly; // << use the tab assembly we stored
                 if (asm == null) return;
 
                 var tabType     = asm.GetType("Cronator.SettingsTabs.Monitors.MonitorsTab");
@@ -171,6 +173,7 @@ namespace Cronator
             }
         }
 
+
         private void ShowPage(Control page)
         {
             if (_currentPage != null)
@@ -195,79 +198,83 @@ namespace Cronator
         {
             try
             {
-                // Scan every loaded tab assembly for a public static property named "SnapshotProvider"
-                // whose type is Func<List<SomeMonitorSnapshotType>>. When found, we build a delegate
-                // that returns List<ThatType> using our BuildMonitorSnapshotsObjects<TSnap,TBox>().
                 foreach (var h in _tabs.Tabs)
                 {
-                    var asm = h.Instance?.GetType()?.Assembly;
+                    var asm = h.Assembly; // << use tab assembly
                     if (asm == null) continue;
 
-                    // Prefer known types (MonitorsInterop, MonitorsTab) first for clearer logs
+                    // Prefer known types first
                     var knownTypes = new[]
                     {
-                        asm.GetType("Cronator.SettingsTabs.Monitors.MonitorsInterop"),
-                        asm.GetType("Cronator.SettingsTabs.Monitors.MonitorsTab")
-                    }.Where(t => t != null).ToArray();
+                        asm.GetType("Cronator.SettingsTabs.Monitors.MonitorsTab"),
+                        asm.GetType("Cronator.SettingsTabs.Monitors.MonitorsInterop")
+                    }.Where(t => t != null)! // ensure non-null
+                    .Cast<Type>()           // cast to non-nullable Type
+                    .ToArray();
 
-                    IEnumerable<Type> exportedPlusKnown = knownTypes.Length > 0
-                        ? knownTypes.Concat(asm.GetExportedTypes().Where(t => !knownTypes.Contains(t)))
-                        : asm.GetExportedTypes();
+                    IEnumerable<Type> exportedPlusKnown =
+                        knownTypes.Any()
+                            ? knownTypes.Concat(asm.GetExportedTypes().Where(t => !knownTypes.Contains(t)))
+                            : asm.GetExportedTypes();
 
                     var candidateProps = exportedPlusKnown
                         .SelectMany(t => t.GetProperties(BindingFlags.Public | BindingFlags.Static))
                         .Where(p => string.Equals(p.Name, "SnapshotProvider", StringComparison.Ordinal))
                         .ToList();
 
+                    Console.WriteLine($"[Tabs] monitors: found {candidateProps.Count} candidate SnapshotProvider propert{(candidateProps.Count==1?"y":"ies")} in {asm.GetName().Name}.");
+
                     foreach (var prop in candidateProps)
                     {
-                        var propType = prop.PropertyType;
-                        if (!propType.IsGenericType) continue;
-
-                        // Must be Func<...>
-                        if (propType.GetGenericTypeDefinition() != typeof(Func<>)) continue;
-
-                        // Return type must be List<TSnapshot>
-                        var retType = propType.GetGenericArguments()[0];
-                        if (!retType.IsGenericType || retType.GetGenericTypeDefinition() != typeof(List<>)) continue;
-
-                        var snapType = retType.GetGenericArguments()[0]; // TSnapshot
-                        if (snapType == null) continue;
-
-                        // Find the WidgetBox type in the same namespace/assembly as the snapshot
-                        // (the Monitors tab project defines both)
-                        var wbType = asm.GetExportedTypes().FirstOrDefault(t =>
-                            t.Namespace == snapType.Namespace && t.Name == "WidgetBox");
-
-                        if (wbType == null)
+                        try
                         {
-                            // Try a looser search just in case
-                            wbType = asm.GetExportedTypes().FirstOrDefault(t => t.Name == "WidgetBox");
+                            Console.WriteLine($"[Tabs] monitors: inspecting {prop.DeclaringType?.FullName}.{prop.Name} : {prop.PropertyType.FullName}");
+
+                            var propType = prop.PropertyType;
+                            if (!propType.IsGenericType)
+                            {
+                                Console.WriteLine("  - reject: property type is not generic (expect Func<>)");
+                                continue;
+                            }
+
+                            if (propType.GetGenericTypeDefinition() != typeof(Func<>))
+                            {
+                                Console.WriteLine("  - reject: property type is not Func<>");
+                                continue;
+                            }
+
+                            var retType = propType.GetGenericArguments()[0];
+                            if (!retType.IsGenericType || retType.GetGenericTypeDefinition() != typeof(List<>))
+                            {
+                                Console.WriteLine("  - reject: return is not List<TSnapshot>");
+                                continue;
+                            }
+
+                            var snapType = retType.GetGenericArguments()[0];
+                            if (snapType == null) { Console.WriteLine("  - reject: no TSnapshot"); continue; }
+
+                            var wbType = asm.GetExportedTypes().FirstOrDefault(t => t.Namespace == snapType.Namespace && t.Name == "WidgetBox")
+                                    ?? asm.GetExportedTypes().FirstOrDefault(t => t.Name == "WidgetBox");
+
+                            if (wbType == null) { Console.WriteLine("  - reject: WidgetBox type not found"); continue; }
+
+                            var buildMethod = typeof(SettingsForm).GetMethod(nameof(BuildMonitorSnapshotsObjects), BindingFlags.NonPublic | BindingFlags.Static);
+                            if (buildMethod == null) { Console.WriteLine("  - reject: builder method missing"); continue; }
+
+                            var closedBuilder = buildMethod.MakeGenericMethod(snapType, wbType);
+                            var del = Delegate.CreateDelegate(propType, closedBuilder);
+
+                            prop.SetValue(null, del);
+                            Console.WriteLine($"[Tabs] monitors: SnapshotProvider injected on {prop.DeclaringType?.FullName}.");
+                            return;
                         }
-
-                        if (wbType == null) continue; // can't build without WidgetBox
-
-                        // Build a closed generic method: BuildMonitorSnapshotsObjects<TSnapshot, WidgetBox>()
-                        var buildMethod = typeof(SettingsForm).GetMethod(
-                            nameof(BuildMonitorSnapshotsObjects),
-                            BindingFlags.NonPublic | BindingFlags.Static);
-
-                        if (buildMethod == null) continue;
-
-                        var closedBuilder = buildMethod.MakeGenericMethod(snapType, wbType);
-
-                        // The closedBuilder signature is: static List<TSnapshot> Method()
-                        // We need a delegate of type: Func<List<TSnapshot>>
-                        var del = Delegate.CreateDelegate(propType, closedBuilder);
-
-                        // Set the static property
-                        prop.SetValue(null, del);
-                        Console.WriteLine($"[Tabs] monitors: SnapshotProvider injected on {prop.DeclaringType?.FullName}.");
-                        return; // injected once is enough
+                        catch (Exception ex)
+                        {
+                            Console.WriteLine($"  - reject: exception while wiring: {ex.Message}");
+                        }
                     }
                 }
 
-                // If we get here, we didn’t find a property to set.
                 Console.WriteLine("[Tabs] monitors: SnapshotProvider property not found to inject.");
             }
             catch (Exception ex)
@@ -364,79 +371,77 @@ namespace Cronator
                 try
                 {
                     var manifestPath = Path.Combine(dir, "manifest.json");
-                    var userPath = Path.Combine(dir, "config.user.json");
+                    var userPath     = Path.Combine(dir, "config.user.json");
 
                     string displayName = Path.GetFileName(dir);
-                    bool enabled = false;
+                    bool enabled = false; // default off unless manifest/user enables
 
-                    JsonElement? settings = null;
+                    JsonNode? settingsNode = null;
 
-                    // Manifest (for name + default enabled?)
+                    // Manifest
                     if (File.Exists(manifestPath))
                     {
-                        using var j = JsonDocument.Parse(File.ReadAllText(manifestPath));
-                        var ro = j.RootElement;
+                        var mn = JsonNode.Parse(File.ReadAllText(manifestPath)) as JsonObject;
+                        if (mn != null)
+                        {
+                            if (mn["displayName"] is JsonValue dv && dv.TryGetValue<string>(out var dn) && !string.IsNullOrWhiteSpace(dn))
+                                displayName = dn;
 
-                        if (ro.TryGetProperty("displayName", out var dn) && dn.ValueKind == JsonValueKind.String)
-                            displayName = dn.GetString() ?? displayName;
-
-                        if (ro.TryGetProperty("enabled", out var en) && (en.ValueKind == JsonValueKind.True || en.ValueKind == JsonValueKind.False))
-                            enabled = en.GetBoolean();
+                            if (mn["enabled"] is JsonValue ev && ev.TryGetValue<bool>(out var en))
+                                enabled = en;
+                        }
                     }
 
-                    // User config overrides enable + settings
+                    // User config overrides
                     if (File.Exists(userPath))
                     {
-                        using var j = JsonDocument.Parse(File.ReadAllText(userPath));
-                        var ro = j.RootElement;
+                        var un = JsonNode.Parse(File.ReadAllText(userPath)) as JsonObject;
+                        if (un != null)
+                        {
+                            if (un["enabled"] is JsonValue ev && ev.TryGetValue<bool>(out var en))
+                                enabled = en;
 
-                        if (ro.TryGetProperty("enabled", out var en) && (en.ValueKind == JsonValueKind.True || en.ValueKind == JsonValueKind.False))
-                            enabled = en.GetBoolean();
-
-                        if (ro.TryGetProperty("settings", out var set))
-                            settings = set;
+                            if (un["settings"] is JsonObject so)
+                                settingsNode = so;
+                        }
                     }
 
                     if (!enabled) continue; // only show enabled widgets
 
-                    // Determine monitor index (monitor|screen|display)
+                    // Monitor index (monitor|screen|display)
                     int mon = 0;
-                    if (TryGetInt(settings, "monitor", out var m0)) mon = m0;
-                    else if (TryGetInt(settings, "screen", out var m1)) mon = m1;
-                    else if (TryGetInt(settings, "display", out var m2)) mon = m2;
+                    if (!TryGetInt(settingsNode, out mon, "monitor", "screen", "display"))
+                        mon = 0;
 
                     if (mon < 0 || mon >= screens.Length) mon = 0;
 
-                    // Determine rectangle
+                    // Normalized rect if available
                     RectangleF rectN = new RectangleF(0.05f, 0.05f, 0.20f, 0.12f); // sensible default
+                    float? nx = GetFloat(settingsNode, "nx");
+                    float? ny = GetFloat(settingsNode, "ny");
+                    float? nw = GetFloat(settingsNode, "nw");
+                    float? nh = GetFloat(settingsNode, "nh");
 
-                    // Prefer normalized if present (nx,ny,nw,nh)
-                    bool hasNorm =
-                        TryGetFloat(settings, "nx", out var nx) |
-                        TryGetFloat(settings, "ny", out var ny) |
-                        TryGetFloat(settings, "nw", out var nw) |
-                        TryGetFloat(settings, "nh", out var nh);
-
-                    if (hasNorm)
+                    if (nx.HasValue || ny.HasValue || nw.HasValue || nh.HasValue)
                     {
                         rectN = new RectangleF(
-                            Clamp01(nx.GetValueOrDefault(0.05f)),
-                            Clamp01(ny.GetValueOrDefault(0.05f)),
-                            Clamp01(nw.GetValueOrDefault(0.20f)),
-                            Clamp01(nh.GetValueOrDefault(0.12f)));
+                            Clamp01(nx ?? 0.05f),
+                            Clamp01(ny ?? 0.05f),
+                            Clamp01(nw ?? 0.20f),
+                            Clamp01(nh ?? 0.12f));
                     }
                     else
                     {
-                        // Try pixel coords (x,y,w,h) or (left,top,width,height)
+                        // Pixel fallback (x,y,w,h or left,top,width,height)
                         var s = screens[mon].Bounds;
-                        float xPx = GetFirstFloat(settings, "x", "left").GetValueOrDefault(s.X + s.Width * 0.05f);
-                        float yPx = GetFirstFloat(settings, "y", "top").GetValueOrDefault(s.Y + s.Height * 0.05f);
-                        float wPx = GetFirstFloat(settings, "w", "width").GetValueOrDefault(s.Width * 0.20f);
-                        float hPx = GetFirstFloat(settings, "h", "height").GetValueOrDefault(s.Height * 0.12f);
+                        float xPx = GetFirstFloat(settingsNode, s.X + s.Width  * 0.05f, "x", "left");
+                        float yPx = GetFirstFloat(settingsNode, s.Y + s.Height * 0.05f, "y", "top");
+                        float wPx = GetFirstFloat(settingsNode, s.Width  * 0.20f, "w", "width");
+                        float hPx = GetFirstFloat(settingsNode, s.Height * 0.12f, "h", "height");
 
                         rectN = new RectangleF(
                             Clamp01((xPx - s.Left) / Math.Max(1, s.Width)),
-                            Clamp01((yPx - s.Top) / Math.Max(1, s.Height)),
+                            Clamp01((yPx - s.Top)  / Math.Max(1, s.Height)),
                             Clamp01(wPx / Math.Max(1, s.Width)),
                             Clamp01(hPx / Math.Max(1, s.Height)));
                     }
@@ -462,6 +467,50 @@ namespace Cronator
             }
 
             return map;
+        }
+
+
+
+        private static bool TryGetInt(JsonNode? settings, out int value, params string[] keys)
+        {
+            value = 0;
+            if (settings is not JsonObject obj) return false;
+
+            foreach (var k in keys)
+            {
+                if (!obj.TryGetPropertyValue(k, out var node) || node is null) continue;
+
+                if (node is JsonValue v)
+                {
+                    if (v.TryGetValue<int>(out var i)) { value = i; return true; }
+                    if (v.TryGetValue<string>(out var s) && int.TryParse(s, out var j)) { value = j; return true; }
+                }
+            }
+            return false;
+        }
+
+        private static float? GetFloat(JsonNode? settings, string key)
+        {
+            if (settings is not JsonObject obj) return null;
+            if (!obj.TryGetPropertyValue(key, out var node) || node is null) return null;
+
+            if (node is JsonValue v)
+            {
+                if (v.TryGetValue<float>(out var f)) return f;
+                if (v.TryGetValue<double>(out var d)) return (float)d;
+                if (v.TryGetValue<string>(out var s) && float.TryParse(s, out var g)) return g;
+            }
+            return null;
+        }
+
+        private static float GetFirstFloat(JsonNode? settings, float fallback, params string[] keys)
+        {
+            foreach (var k in keys)
+            {
+                var f = GetFloat(settings, k);
+                if (f.HasValue) return f.Value;
+            }
+            return fallback;
         }
 
         private static float Clamp01(float v) => v < 0 ? 0 : (v > 1 ? 1 : v);
@@ -560,7 +609,9 @@ namespace Cronator
             public string FolderName { get; init; } = "";
             public TabManifest Manifest { get; init; } = new();
             public ISettingsTab Instance { get; init; } = default!;
+            public System.Reflection.Assembly Assembly { get; init; } = default!;
         }
+
 
         private sealed class ReflectionTabAdapter : ISettingsTab
         {
@@ -668,7 +719,8 @@ namespace Cronator
                         FolderPath = folder,
                         FolderName = fname,
                         Manifest = manifest,
-                        Instance = inst
+                        Instance = inst,
+                        Assembly = asm,                   // << store the tab DLL assembly here
                     });
 
                     var title = inst.Title ?? manifest.displayName ?? manifest.name ?? fname;
@@ -690,6 +742,7 @@ namespace Cronator
 
             if (Tabs.Count == 0) Console.WriteLine("[Tabs] none loaded.");
         }
+
 
         private static Type? AutoDetectTabType(Assembly asm)
         {

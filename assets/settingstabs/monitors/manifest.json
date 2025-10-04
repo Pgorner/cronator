@@ -3,6 +3,6 @@
   "displayName": "Monitors",
   "kind": "dll",
   "assembly": "MonitorsTab.dll",
-  "type": "Cronator.Tabs.Monitors.MonitorsTab",
+  "type": "Cronator.SettingsTabs.Monitors.MonitorsTab",
   "enabled": true
 }
