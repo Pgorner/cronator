@@ -15,7 +15,11 @@ namespace Cronator
         private static Thread? _ui;
         private static volatile bool _started;
 
-        // Animation state
+        // Message loop control (for clean shutdown)
+        private static ApplicationContext? _appCtx;
+        private static SynchronizationContext? _ctx;
+
+        // Animation state (must be used on tray/UI thread)
         private static System.Windows.Forms.Timer? _animTimer;
         private static Icon[]? _animFrames;
         private static int _animIndex;
@@ -44,6 +48,10 @@ namespace Cronator
                 {
                     Application.EnableVisualStyles();
                     Application.SetCompatibleTextRenderingDefault(false);
+
+                    // install a WindowsForms sync context for this thread
+                    _ctx = new WindowsFormsSynchronizationContext();
+                    SynchronizationContext.SetSynchronizationContext(_ctx);
 
                     // Context menu
                     var menu = new ContextMenuStrip();
@@ -92,7 +100,9 @@ namespace Cronator
                     _icon.BalloonTipText = "Running. Right-click for Settings or Exit.";
                     _icon.ShowBalloonTip(2000);
 
-                    Application.Run(); // tray message loop
+                    // Controllable message loop
+                    _appCtx = new ApplicationContext();
+                    Application.Run(_appCtx);
                 }
                 catch (Exception ex)
                 {
@@ -101,6 +111,8 @@ namespace Cronator
                 finally
                 {
                     CleanupIcon();
+                    _appCtx = null;
+                    _ctx = null;
                 }
             });
 
@@ -124,6 +136,9 @@ namespace Cronator
                 {
                     Application.EnableVisualStyles();
                     Application.SetCompatibleTextRenderingDefault(false);
+
+                    _ctx = new WindowsFormsSynchronizationContext();
+                    SynchronizationContext.SetSynchronizationContext(_ctx);
 
                     // Context menu
                     var menu = new ContextMenuStrip();
@@ -177,7 +192,8 @@ namespace Cronator
                     _icon.BalloonTipText = "Running. Right-click for Settings or Exit.";
                     _icon.ShowBalloonTip(2000);
 
-                    Application.Run();
+                    _appCtx = new ApplicationContext();
+                    Application.Run(_appCtx);
                 }
                 catch (Exception ex)
                 {
@@ -186,6 +202,8 @@ namespace Cronator
                 finally
                 {
                     CleanupIcon();
+                    _appCtx = null;
+                    _ctx = null;
                 }
             });
 
@@ -194,18 +212,52 @@ namespace Cronator
             _ui.Start();
         }
 
+        /// <summary>
+        /// Cleanly stop the tray thread and message loop, then join the thread.
+        /// </summary>
         internal static void Stop()
         {
             try
             {
-                StopGifAnimation();
+                // Marshal all UI cleanup to the tray thread
+                if (_ctx != null)
+                {
+                    _ctx.Post(_ =>
+                    {
+                        try
+                        {
+                            // close any settings forms opened from tray
+                            foreach (Form f in Application.OpenForms)
+                                if (f is SettingsForm) f.Close();
+                        }
+                        catch { }
 
-                if (Application.MessageLoop)
-                    Application.ExitThread();
+                        try
+                        {
+                            // Stop animation on UI thread (timer lives there)
+                            StopGifAnimation();
+                        }
+                        catch { }
+
+                        try
+                        {
+                            // Ask the message loop to exit
+                            _appCtx?.ExitThread();
+                        }
+                        catch { }
+                    }, null);
+                }
             }
             catch { }
 
-            CleanupIcon();
+            // Wait for the UI thread to terminate so the process can exit
+            try
+            {
+                if (_ui != null && _ui.IsAlive)
+                    _ui.Join(1500);
+            }
+            catch { }
+
             _started = false;
         }
 
@@ -273,7 +325,7 @@ namespace Cronator
                 int count = gif.GetFrameCount(fd);
                 if (count <= 0) return;
 
-                int target = 16; // 16px looks crisp; adjust if needed
+                int target = 16; // tray sizes are tiny; 16px looks crisp
                 var frames = new Icon[count];
 
                 for (int i = 0; i < count; i++)
@@ -311,7 +363,7 @@ namespace Cronator
             }
         }
 
-        /// <summary>Stop animation and free frame icons.</summary>
+        /// <summary>Stop animation and free frame icons. Must run on the tray thread.</summary>
         internal static void StopGifAnimation()
         {
             try
@@ -348,6 +400,7 @@ namespace Cronator
                 foreach (Form f in Application.OpenForms)
                     if (f is SettingsForm) { f.Activate(); return; }
 
+                // Requires a parameterless SettingsForm() overload (you added one earlier).
                 var form = new SettingsForm();
                 form.Show();
             }
@@ -370,7 +423,9 @@ namespace Cronator
             }
             catch { }
 
-            StopGifAnimation();
+            // StopGifAnimation must have run on UI thread before ExitThread;
+            // here we only ensure unmanaged handles list is empty as a fallback.
+            try { StopGifAnimation(); } catch { }
         }
 
         /// <summary>Create a tiny 16x16 colored dot icon.</summary>
