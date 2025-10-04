@@ -6,28 +6,55 @@ using System.Collections.Generic;
 
 namespace ClockWidgetNS
 {
+    /// <summary>
+    /// Host can (optionally) inject these delegates via reflection:
+    ///   - set ClockWidgetNS.WidgetLog.Info/Warn/Error = (msg) => Cronator.Log.*/Console.WriteLine...
+    /// If not set, calls are no-ops. This keeps the widget decoupled from the host.
+    /// </summary>
+    internal static class WidgetLog
+    {
+        public static Action<string> Info  = s => Console.WriteLine(s);
+        public static Action<string> Warn  = s => Console.WriteLine("WARN: " + s);
+        public static Action<string> Error = s => Console.Error.WriteLine("ERR: " + s);
+
+        public static void I(string msg) => Info(msg);
+        public static void W(string msg) => Warn(msg);
+        public static void E(string msg) => Error(msg);
+    }
+
     public sealed class ClockWidget
     {
         // ---- settings (with safe defaults) ----
         private string _format   = "HH:mm:ss";
-        private float  _fontPx   = 120f;      // base size in pixels (96-DPI logical)
-        private float  _scale    = 1.0f;      // multiplier applied on top of fontPx
-        private string _anchor   = "top-right"; // top-left|top-right|bottom-left|bottom-right|center
-        private int    _offsetX  = -40;       // px from anchor (positive to the right)
-        private int    _offsetY  = 40;        // px from anchor (positive downward)
-        private bool   _autoFit  = false;     // shrink to fit below max box if true
-        private float  _maxBoxPctW = 0.40f;   // 40% of monitor width
-        private float  _maxBoxPctH = 0.20f;   // 20% of monitor height
+        private float  _fontPx   = 120f;         // base size in pixels (96-DPI logical)
+        private float  _scale    = 1.0f;         // multiplier applied on top of fontPx
+        private string _anchor   = "top-right";  // top-left|top-right|bottom-left|bottom-right|center
+        private int    _offsetX  = -40;          // px from anchor (positive to the right)
+        private int    _offsetY  = 40;           // px from anchor (positive downward)
+        private bool   _autoFit  = false;        // shrink to fit below max box if true
+        private float  _maxBoxPctW = 0.40f;      // 40% of monitor width
+        private float  _maxBoxPctH = 0.20f;      // 20% of monitor height
         private Color  _color    = Color.White;
         private Color  _shadow   = Color.FromArgb(160, 0, 0, 0);
-        private bool   _drawBg   = false;     // optional soft background panel
+        private bool   _drawBg   = false;        // optional soft background panel
         private Color  _bgColor  = Color.FromArgb(128, 0, 0, 0);
         private Color  _bgBorder = Color.FromArgb(180, 255, 255, 255);
+
+        // ---- normalized placement (from Settings Monitors tab) ----
+        private bool  _useNorm = false;    // true when any of nx/ny/nw/nh is provided
+        private float _nx, _ny, _nw, _nh;  // normalized in [0..1] relative to monitor
+
+        // throttle logging so we don't spam once per tick
+        private static DateTime _lastDrawLog = DateTime.MinValue;
 
         // ---- settings loader ----
         public void ApplySettings(Dictionary<string, object?> s)
         {
-            if (s is null) return;
+            if (s is null)
+            {
+                WidgetLog.W("ApplySettings called with null dictionary.");
+                return;
+            }
 
             if (TryGet(s, "format", out string? fmt) && !string.IsNullOrWhiteSpace(fmt)) _format = fmt;
 
@@ -50,6 +77,20 @@ namespace ClockWidgetNS
             if (TryGetB(s, "bg", out bool bg)) _drawBg = bg;
             if (TryGet(s, "bgColor", out string? bc) && TryParseColor(bc!, out var bcol)) _bgColor = bcol;
             if (TryGet(s, "bgBorder", out string? bbo) && TryParseColor(bbo!, out var bb)) _bgBorder = bb;
+
+            // ---- normalized rectangle (if present, overrides anchor/offset/autofit box) ----
+            bool anyNorm = false;
+            if (TryGetF(s, "nx", out float nx)) { _nx = Clamp01(nx); anyNorm = true; }
+            if (TryGetF(s, "ny", out float ny)) { _ny = Clamp01(ny); anyNorm = true; }
+            if (TryGetF(s, "nw", out float nw)) { _nw = Math.Max(0.01f, Clamp01(nw)); anyNorm = true; }
+            if (TryGetF(s, "nh", out float nh)) { _nh = Math.Max(0.01f, Clamp01(nh)); anyNorm = true; }
+            _useNorm = anyNorm;
+
+            WidgetLog.I(
+                $"ApplySettings: format='{_format}', fontPx={_fontPx}, scale={_scale}, " +
+                $"anchor='{_anchor}', off=({_offsetX},{_offsetY}), autoFit={_autoFit}, " +
+                $"maxBoxPct=({_maxBoxPctW:P0},{_maxBoxPctH:P0}), color={_color}, bg={_drawBg}; " +
+                $"useNorm={_useNorm} nx={_nx:0.###} ny={_ny:0.###} nw={_nw:0.###} nh={_nh:0.###}");
         }
 
         // ---- draw ----
@@ -82,11 +123,26 @@ namespace ClockWidgetNS
             using (var fProbe = new Font("Segoe UI", sizePx, FontStyle.Bold, GraphicsUnit.Pixel))
                 textSize = g.MeasureString(text, fProbe, int.MaxValue);
 
-            // optional auto-fit inside a percentage box of the monitor area
-            if (_autoFit)
+            // If we have a normalized rect, we auto-fit inside that rect by default.
+            float maxW = 0, maxH = 0;
+            if (_useNorm)
             {
-                float maxW = monitorRect.Width  * _maxBoxPctW;
-                float maxH = monitorRect.Height * _maxBoxPctH;
+                maxW = monitorRect.Width  * _nw;
+                maxH = monitorRect.Height * _nh;
+
+                if (textSize.Width > 0.1f && textSize.Height > 0.1f)
+                {
+                    float ratioW = maxW / textSize.Width;
+                    float ratioH = maxH / textSize.Height;
+                    float shrink = Math.Min(ratioW, ratioH);
+                    if (shrink < 1f) sizePx = Math.Max(8f * dpiScale, sizePx * shrink);
+                }
+            }
+            else if (_autoFit)
+            {
+                maxW = monitorRect.Width  * _maxBoxPctW;
+                maxH = monitorRect.Height * _maxBoxPctH;
+
                 if (textSize.Width > 0.1f && textSize.Height > 0.1f)
                 {
                     float ratioW = maxW / textSize.Width;
@@ -103,37 +159,49 @@ namespace ClockWidgetNS
 
             var size = g.MeasureString(text, font);
 
-            // anchor
+            // Position
             float x, y;
-            switch (_anchor)
+            string posMode;
+            if (_useNorm)
             {
-                case "top-left":
-                case "upperleft":
-                    x = 0; y = 0; break;
-
-                case "top-right":
-                case "upperright":
-                    x = monitorRect.Width - size.Width; y = 0; break;
-
-                case "bottom-left":
-                case "lowerleft":
-                    x = 0; y = monitorRect.Height - size.Height; break;
-
-                case "bottom-right":
-                case "lowerright":
-                    x = monitorRect.Width - size.Width; y = monitorRect.Height - size.Height; break;
-
-                case "center":
-                    x = (monitorRect.Width  - size.Width)  / 2f;
-                    y = (monitorRect.Height - size.Height) / 2f; break;
-
-                default: // fallback
-                    x = monitorRect.Width - size.Width; y = 0; break;
+                // Top-left of the normalized rect relative to monitor
+                x = monitorRect.Width  * _nx;
+                y = monitorRect.Height * _ny;
+                posMode = $"norm({_nx:0.###},{_ny:0.###},{_nw:0.###},{_nh:0.###}) max=({maxW:0.#},{maxH:0.#})";
             }
+            else
+            {
+                switch (_anchor)
+                {
+                    case "top-left":
+                    case "upperleft":
+                        x = 0; y = 0; break;
 
-            // offsets
-            x += _offsetX;
-            y += _offsetY;
+                    case "top-right":
+                    case "upperright":
+                        x = monitorRect.Width - size.Width; y = 0; break;
+
+                    case "bottom-left":
+                    case "lowerleft":
+                        x = 0; y = monitorRect.Height - size.Height; break;
+
+                    case "bottom-right":
+                    case "lowerright":
+                        x = monitorRect.Width - size.Width; y = monitorRect.Height - size.Height; break;
+
+                    case "center":
+                        x = (monitorRect.Width  - size.Width)  / 2f;
+                        y = (monitorRect.Height - size.Height) / 2f; break;
+
+                    default: // fallback
+                        x = monitorRect.Width - size.Width; y = 0; break;
+                }
+
+                // offsets only apply for anchor-mode
+                x += _offsetX;
+                y += _offsetY;
+                posMode = $"anchor='{_anchor}' off=({_offsetX},{_offsetY})";
+            }
 
             // optional background panel
             if (_drawBg)
@@ -150,6 +218,18 @@ namespace ClockWidgetNS
             // shadow + text
             g.DrawString(text, font, shBr, x + 2, y + 2);
             g.DrawString(text, font, brush, x, y);
+
+            // Throttled draw log (every ~2 seconds)
+            var nowUtc = DateTime.UtcNow;
+            if ((nowUtc - _lastDrawLog).TotalSeconds >= 2)
+            {
+                _lastDrawLog = nowUtc;
+                var finalRect = new RectangleF(x, y, size.Width, size.Height);
+                WidgetLog.I(
+                    $"Draw: virt={virt} monitor={monitorRect} dpiScale={dpiScale:0.###} " +
+                    $"text='{text}' measured=({textSize.Width:0.#}x{textSize.Height:0.#}) " +
+                    $"fontPx={sizePx:0.#} mode={posMode} finalRectPx={finalRect}");
+            }
 
             g.Restore(state);
         }

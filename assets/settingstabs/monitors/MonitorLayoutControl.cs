@@ -53,29 +53,26 @@ namespace Cronator.SettingsTabs.Monitors
     {
         public MonitorSnapshot? Data { get; private set; }
 
-        // Editing support
+        // Raised on every live change (drag/resize)
         public event Action<string /*widgetName*/, RectangleF /*newRectNorm*/>? WidgetChanged;
 
-        private Rectangle _face;                // drawable monitor face on canvas
+        private Rectangle _face; // drawable monitor face
         private readonly Dictionary<WidgetBox, Rectangle> _drawRects = new();
+
         private WidgetBox? _hot;
         private WidgetBox? _active;
+
         private Point _dragStart;
-        private Rectangle _activeStartPx;       // px rect at drag start
+        private Rectangle _activeStartPx;
+
+        private bool _isDragging;
         private bool _resizing;
-        private HandleKind _handle = HandleKind.None;
+        private bool _layoutBuilt;
 
         private enum HandleKind { None, N, S, E, W, NE, NW, SE, SW }
+        private HandleKind _handle = HandleKind.None;
 
-        private const int HandleSize = 7;
-
-        public void SetMonitor(MonitorSnapshot? snapshot)
-        {
-            Data = snapshot;
-            _hot = _active = null;
-            _drawRects.Clear();
-            Invalidate();
-        }
+        private const int HandleSize = 11; // a little larger for easier grabbing
 
         public MonitorLayoutControl()
         {
@@ -85,10 +82,28 @@ namespace Cronator.SettingsTabs.Monitors
             Font = new Font("Segoe UI", 9f, FontStyle.Regular, GraphicsUnit.Point);
 
             Cursor = Cursors.Arrow;
-            MouseMove += OnMouseMove;
-            MouseDown += OnMouseDown;
-            MouseUp   += OnMouseUp;
-            MouseLeave += (_, __) => { _hot = null; _handle = HandleKind.None; Invalidate(); };
+            MouseMove  += OnMouseMove;
+            MouseDown  += OnMouseDown;
+            MouseUp    += OnMouseUp;
+            MouseLeave += (_, __) => { if (!_isDragging) { _hot = null; _handle = HandleKind.None; Invalidate(); } };
+        }
+
+        public void SetMonitor(MonitorSnapshot? snapshot)
+        {
+            Data = snapshot;
+            _hot = _active = null;
+            _isDragging = false;
+            _resizing = false;
+            _layoutBuilt = false;
+            _drawRects.Clear();
+            Invalidate();
+        }
+
+        protected override void OnSizeChanged(EventArgs e)
+        {
+            base.OnSizeChanged(e);
+            _layoutBuilt = false;
+            Invalidate();
         }
 
         protected override void OnPaint(PaintEventArgs e)
@@ -102,16 +117,12 @@ namespace Cronator.SettingsTabs.Monitors
             using var bg = new SolidBrush(BackColor);
             g.FillRectangle(bg, ClientRectangle);
 
-            _drawRects.Clear();
-
-            if (Data == null || Data.Bounds.Width <= 0 || Data.Bounds.Height <= 0)
+            EnsureLayoutBuilt();
+            if (!_layoutBuilt || Data == null || _face.Width <= 0 || _face.Height <= 0)
             {
                 DrawEmpty(g);
                 return;
             }
-
-            var monRect = GetScaledRect(Data.Bounds, ClientRectangle, 16);
-            _face = Rectangle.Inflate(monRect, -2, -2);
 
             using (var faceBrush = new SolidBrush(Color.FromArgb(245, 245, 248)))
                 RoundedRect.Fill(g, faceBrush, _face, 14);
@@ -119,7 +130,7 @@ namespace Cronator.SettingsTabs.Monitors
                 RoundedRect.Stroke(g, borderPen, _face, 14);
 
             // Title
-            var title = $"{(Data.IsPrimary ? "★ " : "")}Monitor {Data.Index}  {Data.Label}";
+            var title = $"{(Data!.IsPrimary ? "★ " : "")}Monitor {Data.Index}  {Data.Label}";
             using (var titleFont = new Font(Font, FontStyle.Bold))
             {
                 var size = TextRenderer.MeasureText(title, titleFont, Size.Empty, TextFormatFlags.NoPadding);
@@ -128,46 +139,74 @@ namespace Cronator.SettingsTabs.Monitors
             }
 
             // Widgets
-            if (Data.Widgets is { Count: > 0 })
+            foreach (var (w, r) in _drawRects.ToArray())
             {
-                foreach (var w in Data.Widgets)
+                if (!w.Enabled) continue;
+
+                using (var b = new SolidBrush(Color.FromArgb(220, w.Color)))
+                    RoundedRect.Fill(g, b, r, 8);
+                using (var p = new Pen(Color.FromArgb(255, w.Color), 1.5f))
+                    RoundedRect.Stroke(g, p, r, 8);
+
+                // Label
+                var label = string.IsNullOrWhiteSpace(w.Name) ? "Widget" : w.Name;
+                var textRect = Rectangle.Inflate(r, -4, -4);
+                using var f = new Font(Font.FontFamily, Math.Max(7f, Math.Min(10f, r.Height * 0.28f)), FontStyle.Regular, GraphicsUnit.Point);
+                TextRenderer.DrawText(
+                    g, label, f, textRect, Color.FromArgb(35, 35, 40),
+                    TextFormatFlags.EndEllipsis | TextFormatFlags.VerticalCenter | TextFormatFlags.HorizontalCenter
+                    | TextFormatFlags.NoPadding | TextFormatFlags.SingleLine);
+
+                // Selection adorners
+                if (w == _active || w == _hot)
                 {
-                    if (!w.Enabled) continue;
-
-                    var r = NormToFace(w.RectNorm);
-                    _drawRects[w] = r;
-
-                    using (var b = new SolidBrush(Color.FromArgb(220, w.Color)))
-                        RoundedRect.Fill(g, b, r, 8);
-                    using (var p = new Pen(Color.FromArgb(255, w.Color), 1.5f))
-                        RoundedRect.Stroke(g, p, r, 8);
-
-                    // Label
-                    var label = string.IsNullOrWhiteSpace(w.Name) ? "Widget" : w.Name;
-                    var textRect = Rectangle.Inflate(r, -4, -4);
-                    using var f = new Font(Font.FontFamily, Math.Max(7f, Math.Min(10f, r.Height * 0.28f)), FontStyle.Regular, GraphicsUnit.Point);
-                    TextRenderer.DrawText(
-                        g, label, f, textRect, Color.FromArgb(35, 35, 40),
-                        TextFormatFlags.EndEllipsis | TextFormatFlags.VerticalCenter | TextFormatFlags.HorizontalCenter
-                        | TextFormatFlags.NoPadding | TextFormatFlags.SingleLine);
-
-                    // Selection adorners
-                    if (w == _active || w == _hot)
-                    {
-                        using var selPen = new Pen(Color.FromArgb(60, 60, 75), 1.5f) { DashStyle = DashStyle.Dot };
-                        g.DrawRectangle(selPen, r);
-                        DrawHandles(g, r);
-                    }
+                    using var selPen = new Pen(Color.FromArgb(60, 60, 75), 1.5f) { DashStyle = DashStyle.Dot };
+                    g.DrawRectangle(selPen, r);
+                    DrawHandles(g, r);
                 }
             }
 
             DrawLegend(g, _face.Bottom + 10);
         }
 
+        // ---------- Layout ----------
+
+        private void EnsureLayoutBuilt()
+        {
+            if (_isDragging) return; // don't rebuild while dragging
+
+            if (Data == null || Data.Bounds.Width <= 0 || Data.Bounds.Height <= 0)
+            {
+                _layoutBuilt = false;
+                _face = Rectangle.Empty;
+                _drawRects.Clear();
+                return;
+            }
+
+            var monRect = GetScaledRect(Data.Bounds, ClientRectangle, 16);
+            _face = Rectangle.Inflate(monRect, -2, -2);
+
+            // (re)build rects if empty or count differs
+            if (_drawRects.Count == 0 || _drawRects.Count != (Data.Widgets?.Count ?? 0))
+            {
+                _drawRects.Clear();
+                if (Data.Widgets != null)
+                {
+                    foreach (var w in Data.Widgets)
+                    {
+                        if (!w.Enabled) continue;
+                        _drawRects[w] = NormToFace(w.RectNorm);
+                    }
+                }
+            }
+
+            _layoutBuilt = true;
+        }
+
         private Rectangle NormToFace(RectangleF rn)
         {
             int x = _face.Left + (int)Math.Round(rn.X * _face.Width);
-            int y = _face.Top + (int)Math.Round(rn.Y * _face.Height);
+            int y = _face.Top  + (int)Math.Round(rn.Y * _face.Height);
             int w = (int)Math.Round(Math.Max(0.01f, rn.Width)  * _face.Width);
             int h = (int)Math.Round(Math.Max(0.01f, rn.Height) * _face.Height);
             return new Rectangle(x, y, w, h);
@@ -180,7 +219,6 @@ namespace Cronator.SettingsTabs.Monitors
             float nw = Clamp01(px.Width  / Math.Max(1f, _face.Width));
             float nh = Clamp01(px.Height / Math.Max(1f, _face.Height));
 
-            // keep in-bounds & min size
             if (nx + nw > 1f) nx = 1f - nw;
             if (ny + nh > 1f) ny = 1f - nh;
             nw = Math.Max(0.01f, nw);
@@ -235,15 +273,37 @@ namespace Cronator.SettingsTabs.Monitors
                 TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
         }
 
-        // ---------------- Interactions ----------------
+        // ---------- Interactions ----------
+
+        private void OnMouseDown(object? sender, MouseEventArgs e)
+        {
+            if (Data == null || e.Button != MouseButtons.Left) return;
+
+            EnsureLayoutBuilt(); // make sure rects exist for hit-test
+            if (!_layoutBuilt) return;
+
+            var (hit, handle) = HitTest(e.Location);
+            _active = hit;
+            _handle = handle;
+            _resizing = _active != null && handle != HandleKind.None;
+            _dragStart = e.Location;
+
+            if (_active != null)
+            {
+                _activeStartPx = _drawRects[_active];
+                _isDragging = true;
+                Capture = true; // keep mouse even if cursor leaves control
+            }
+
+            Invalidate();
+        }
 
         private void OnMouseMove(object? sender, MouseEventArgs e)
         {
             if (Data == null) return;
 
-            if (_active != null && e.Button == MouseButtons.Left)
+            if (_active != null && _isDragging && Capture)
             {
-                var cur = _drawRects[_active];
                 int dx = e.X - _dragStart.X;
                 int dy = e.Y - _dragStart.Y;
                 var r = _activeStartPx;
@@ -252,10 +312,10 @@ namespace Cronator.SettingsTabs.Monitors
                 {
                     switch (_handle)
                     {
-                        case HandleKind.N: r.Y = _activeStartPx.Y + dy; r.Height = _activeStartPx.Height - dy; break;
-                        case HandleKind.S: r.Height = _activeStartPx.Height + dy; break;
-                        case HandleKind.W: r.X = _activeStartPx.X + dx; r.Width = _activeStartPx.Width - dx; break;
-                        case HandleKind.E: r.Width = _activeStartPx.Width + dx; break;
+                        case HandleKind.N:  r.Y = _activeStartPx.Y + dy; r.Height = _activeStartPx.Height - dy; break;
+                        case HandleKind.S:  r.Height = _activeStartPx.Height + dy; break;
+                        case HandleKind.W:  r.X = _activeStartPx.X + dx; r.Width  = _activeStartPx.Width  - dx; break;
+                        case HandleKind.E:  r.Width  = _activeStartPx.Width  + dx; break;
                         case HandleKind.NE: r.Y = _activeStartPx.Y + dy; r.Height = _activeStartPx.Height - dy; r.Width = _activeStartPx.Width + dx; break;
                         case HandleKind.NW: r.Y = _activeStartPx.Y + dy; r.Height = _activeStartPx.Height - dy; r.X = _activeStartPx.X + dx; r.Width = _activeStartPx.Width - dx; break;
                         case HandleKind.SE: r.Width = _activeStartPx.Width + dx; r.Height = _activeStartPx.Height + dy; break;
@@ -267,9 +327,10 @@ namespace Cronator.SettingsTabs.Monitors
                     r.X += dx; r.Y += dy;
                 }
 
-                // keep inside face + min size
                 r = KeepInFace(r);
                 _drawRects[_active] = r;
+
+                // keep model in sync + notify
                 _active.RectNorm = FaceToNorm(r);
                 WidgetChanged?.Invoke(_active.Name, _active.RectNorm);
 
@@ -277,46 +338,37 @@ namespace Cronator.SettingsTabs.Monitors
                 return;
             }
 
-            // hover
-            var (hit, handle) = HitTest(e.Location);
-            _hot = hit;
-            _handle = handle;
-            Cursor = CursorForHandle(handle, hit != null);
-            Invalidate();
-        }
-
-        private void OnMouseDown(object? sender, MouseEventArgs e)
-        {
-            if (Data == null || e.Button != MouseButtons.Left) return;
-            var (hit, handle) = HitTest(e.Location);
-            _active = hit;
-            _handle = handle;
-            _resizing = _active != null && handle != HandleKind.None;
-            _dragStart = e.Location;
-
-            if (_active != null)
-            {
-                _activeStartPx = _drawRects[_active];
-            }
-
+            // hover feedback
+            EnsureLayoutBuilt();
+            var (hit2, handle2) = HitTest(e.Location);
+            _hot = hit2;
+            _handle = handle2;
+            Cursor = CursorForHandle(handle2, hit2 != null);
             Invalidate();
         }
 
         private void OnMouseUp(object? sender, MouseEventArgs e)
         {
+            if (_isDragging)
+            {
+                _isDragging = false;
+                Capture = false;
+            }
             _resizing = false;
             _handle = HandleKind.None;
         }
 
         private (WidgetBox? box, HandleKind handle) HitTest(Point p)
         {
-            if (Data == null) return (null, HandleKind.None);
-            // first handles, then body
+            if (Data == null || !_layoutBuilt) return (null, HandleKind.None);
+
+            // handles first
             foreach (var kv in _drawRects)
             {
                 var h = HandleAtPoint(kv.Value, p);
                 if (h != HandleKind.None) return (kv.Key, h);
             }
+            // then body
             foreach (var kv in _drawRects)
             {
                 if (kv.Value.Contains(p)) return (kv.Key, HandleKind.None);

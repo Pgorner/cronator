@@ -7,6 +7,7 @@ using System.IO;
 using System.Linq;
 using System.Reflection;
 using System.Runtime.InteropServices;
+using System.Text;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
@@ -16,6 +17,39 @@ namespace Cronator
 {
     internal static class Program
     {
+        // ---------- Console ↔ Log bridge ----------
+        private sealed class ConsoleLogWriter : TextWriter
+        {
+            private readonly TextWriter _inner;
+            private readonly bool _isError;
+            public ConsoleLogWriter(TextWriter inner, bool isError = false) { _inner = inner; _isError = isError; }
+            public override Encoding Encoding => _inner.Encoding;
+
+            public override void Write(string? value)
+            {
+                _inner.Write(value);
+                if (!string.IsNullOrEmpty(value))
+                {
+                    if (_isError) Log.E("CLI", value.TrimEnd());
+                    else Log.I("CLI", value.TrimEnd());
+                }
+            }
+            public override void WriteLine(string? value)
+            {
+                _inner.WriteLine(value);
+                if (!string.IsNullOrEmpty(value))
+                {
+                    if (_isError) Log.E("CLI", value);
+                    else Log.I("CLI", value);
+                }
+            }
+            public override void Write(char value)
+            {
+                _inner.Write(value);
+            }
+            public override void Flush() => _inner.Flush();
+        }
+
         // ===== Win32 wallpaper SPI =====
         [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
         private static extern bool SystemParametersInfo(int uAction, int uParam, string lpvParam, int fuWinIni);
@@ -143,6 +177,19 @@ namespace Cronator
         [STAThread]
         private static void Main()
         {
+            // Init logging + mirror console to Log.*
+            Log.Init(level: LogLevel.Debug);
+            Console.SetOut(new ConsoleLogWriter(Console.Out));
+            Console.SetError(new ConsoleLogWriter(Console.Error, isError: true));
+
+            // Global exception logging
+            AppDomain.CurrentDomain.UnhandledException += (s, e) =>
+                Log.E("App", "Unhandled exception", e.ExceptionObject as Exception);
+            Application.ThreadException += (s, e) =>
+                Log.E("App", "UI thread exception", e.Exception);
+
+            Log.I("App", "Cronator starting…");
+
             Console.Title = "cronator — DLL widgets on wallpaper (COM if possible, SPAN otherwise)";
             Directory.CreateDirectory(TempDir);
 
@@ -223,7 +270,7 @@ namespace Cronator
                         StopTimer();
                         StopClockTimer();
                         TryRestore();
-                        Cronator.Tray.Stop();   // ensure tray loop is down in console exit too
+                        Cronator.Tray.Stop();
                         Console.WriteLine("Restored. Bye.");
                         break;
                     }
@@ -392,8 +439,7 @@ namespace Cronator
                     {
                         // Align to next second boundary
                         var now = DateTime.Now;
-                        int msToNextSecond = 1000 - now.Millisecond;
-                        if (msToNextSecond < 1) msToNextSecond = 1;
+                        int msToNextSecond = Math.Max(1, 1000 - now.Millisecond);
                         await Task.Delay(msToNextSecond, token);
 
                         int sec = DateTime.Now.Second;
@@ -643,7 +689,6 @@ namespace Cronator
             }
         }
 
-
         // ===== Drawing helpers =====
         private static Image? LoadImageUnlocked(string path)
         {
@@ -691,7 +736,6 @@ namespace Cronator
                 Environment.Exit(0);
             });
         }
-
 
         internal static string[] TrayGetMonitorList()
         {
@@ -847,6 +891,9 @@ namespace Cronator
 
                         var asm = System.Runtime.Loader.AssemblyLoadContext.Default.LoadFromAssemblyPath(fullAsm);
 
+                        // Inject widget log (if the shim exists in that DLL)
+                        InjectWidgetLog(asm, manifest.name ?? name);
+
                         // Try the declared type first
                         Type? t = null;
                         if (!string.IsNullOrWhiteSpace(typeName))
@@ -855,7 +902,6 @@ namespace Cronator
                             if (t == null)
                             {
                                 Console.WriteLine($"[Widgets] {name}: type not found in '{Path.GetFileName(fullAsm)}': {typeName}");
-                                // Log what IS available
                                 try
                                 {
                                     var exported = asm.GetExportedTypes().Select(x => x.FullName).OrderBy(x => x).ToArray();
@@ -925,6 +971,27 @@ namespace Cronator
             }
 
             // ---- helpers ----
+            private static void InjectWidgetLog(Assembly asm, string widgetName)
+            {
+                try
+                {
+                    var logType = asm.GetType("ClockWidgetNS.WidgetLog");
+                    if (logType == null) return;
+
+                    void Set(string prop, Action<string> fn)
+                    {
+                        var p = logType.GetProperty(prop, BindingFlags.Public | BindingFlags.Static);
+                        if (p != null && p.PropertyType == typeof(Action<string>))
+                            p.SetValue(null, (Action<string>)(msg => fn($"[{widgetName}] {msg}")));
+                    }
+
+                    Set("Info",  m => Log.I("Widget", m));
+                    Set("Warn",  m => Log.W("Widget", m));
+                    Set("Error", m => Log.E("Widget", m));
+                }
+                catch { /* best-effort */ }
+            }
+
             private static Type? AutoDetectWidgetType(Assembly asm)
             {
                 try

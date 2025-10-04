@@ -432,19 +432,12 @@ namespace Cronator
                     }
                     else
                     {
-                        // Pixel fallback (x,y,w,h or left,top,width,height)
-                        var s = screens[mon].Bounds;
-                        float xPx = GetFirstFloat(settingsNode, s.X + s.Width  * 0.05f, "x", "left");
-                        float yPx = GetFirstFloat(settingsNode, s.Y + s.Height * 0.05f, "y", "top");
-                        float wPx = GetFirstFloat(settingsNode, s.Width  * 0.20f, "w", "width");
-                        float hPx = GetFirstFloat(settingsNode, s.Height * 0.12f, "h", "height");
-
-                        rectN = new RectangleF(
-                            Clamp01((xPx - s.Left) / Math.Max(1, s.Width)),
-                            Clamp01((yPx - s.Top)  / Math.Max(1, s.Height)),
-                            Clamp01(wPx / Math.Max(1, s.Width)),
-                            Clamp01(hPx / Math.Max(1, s.Height)));
+                        // Derive from common anchor/offset clock settings so the initial view matches what you see
+                        var s = screens[mon];
+                        var rectFromAnchor = RectFromAnchor(s, settingsNode);
+                        rectN = rectFromAnchor;
                     }
+
 
                     rectN = NormalizeRect(rectN);
 
@@ -469,6 +462,72 @@ namespace Cronator
             return map;
         }
 
+        // ---------- JsonNode helpers ----------
+        private static string? GetString(JsonNode? settings, string key)
+        {
+            if (settings is not JsonObject obj) return null;
+            if (!obj.TryGetPropertyValue(key, out var node) || node is null) return null;
+            if (node is JsonValue v && v.TryGetValue<string>(out var s)) return s;
+            return null;
+        }
+
+        private static float? GetFirstFloat(JsonNode? settings, params string[] keys)
+        {
+            foreach (var k in keys)
+            {
+                var f = GetFloat(settings, k);
+                if (f.HasValue) return f.Value;
+            }
+            return null;
+        }
+
+        // Already present in your file (keep these); shown here for clarity:
+        // private static float? GetFloat(JsonNode? settings, string key) { ... } 
+        // private static bool TryGetInt(JsonNode? settings, out int value, params string[] keys) { ... }
+
+        // ---------- Anchor → normalized rect (JsonNode version) ----------
+        private static RectangleF RectFromAnchor(Screen s, JsonNode? settings)
+        {
+            string fmt    = GetString(settings, "format") ?? "HH:mm:ss";
+            float fontPx  = GetFirstFloat(settings, "fontPx") ?? 120f;
+            float scale   = GetFirstFloat(settings, "scale")  ?? 1f;
+            string anchor = (GetString(settings, "anchor") ?? "top-right").ToLowerInvariant();
+            int offX      = (int)(GetFirstFloat(settings, "offsetX") ?? 0f);
+            int offY      = (int)(GetFirstFloat(settings, "offsetY") ?? 0f);
+
+            // Measure using a probe font (device px)
+            var now = DateTime.Now.ToString(fmt);
+            SizeF textSize;
+            using (var bmp = new Bitmap(1,1))
+            using (var g = Graphics.FromImage(bmp))
+            using (var f = new Font("Segoe UI", Math.Max(8f, fontPx * scale), FontStyle.Bold, GraphicsUnit.Pixel))
+                textSize = g.MeasureString(now, f);
+
+            var m = s.Bounds;
+            float x, y;
+            switch (anchor)
+            {
+                case "top-left":      x = 0;                  y = 0;                   break;
+                case "top-right":     x = m.Width - textSize.Width;  y = 0;            break;
+                case "bottom-left":   x = 0;                  y = m.Height - textSize.Height; break;
+                case "bottom-right":  x = m.Width - textSize.Width;  y = m.Height - textSize.Height; break;
+                case "center":        x = (m.Width - textSize.Width)/2f; y = (m.Height - textSize.Height)/2f; break;
+                default:              x = m.Width - textSize.Width;    y = 0;          break;
+            }
+            x += offX; y += offY;
+
+            float nx = Clamp01((float)x / Math.Max(1, m.Width));
+            float ny = Clamp01((float)y / Math.Max(1, m.Height));
+            float nw = Clamp01((float)textSize.Width  / Math.Max(1, m.Width));
+            float nh = Clamp01((float)textSize.Height / Math.Max(1, m.Height));
+
+            nw = Math.Max(0.01f, nw);
+            nh = Math.Max(0.01f, nh);
+            if (nx + nw > 1f) nx = 1f - nw;
+            if (ny + nh > 1f) ny = 1f - nh;
+
+            return new RectangleF(nx, ny, nw, nh);
+        }
 
 
         private static bool TryGetInt(JsonNode? settings, out int value, params string[] keys)
@@ -527,35 +586,6 @@ namespace Cronator
             w = Math.Max(0.01f, w);
             h = Math.Max(0.01f, h);
             return new RectangleF(x, y, w, h);
-        }
-
-        private static bool TryGetInt(JsonElement? settings, string key, out int value)
-        {
-            value = 0;
-            if (settings is null || settings.Value.ValueKind != JsonValueKind.Object) return false;
-            if (!settings.Value.TryGetProperty(key, out var el)) return false;
-            if (el.ValueKind == JsonValueKind.Number && el.TryGetInt32(out var i)) { value = i; return true; }
-            if (el.ValueKind == JsonValueKind.String && int.TryParse(el.GetString(), out var j)) { value = j; return true; }
-            return false;
-        }
-
-        private static bool TryGetFloat(JsonElement? settings, string key, out float? value)
-        {
-            value = null;
-            if (settings is null || settings.Value.ValueKind != JsonValueKind.Object) return false;
-            if (!settings.Value.TryGetProperty(key, out var el)) return false;
-            if (el.ValueKind == JsonValueKind.Number) { value = el.GetSingle(); return true; }
-            if (el.ValueKind == JsonValueKind.String && float.TryParse(el.GetString(), out var f)) { value = f; return true; }
-            return false;
-        }
-
-        private static float? GetFirstFloat(JsonElement? settings, params string[] keys)
-        {
-            foreach (var k in keys)
-            {
-                if (TryGetFloat(settings, k, out var v) && v.HasValue) return v.Value;
-            }
-            return null;
         }
 
         private static Color ColorFromName(string name)

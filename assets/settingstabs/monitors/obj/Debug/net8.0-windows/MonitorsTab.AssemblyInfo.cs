@@ -13,7 +13,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("MonitorsTab")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+fe65b1be30b3d30b9ce0922be6d1a5d950e61440")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+c933b0a0ffe718ced564281fdfb7d5915777933b")]
 [assembly: System.Reflection.AssemblyProductAttribute("MonitorsTab")]
 [assembly: System.Reflection.AssemblyTitleAttribute("MonitorsTab")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]
