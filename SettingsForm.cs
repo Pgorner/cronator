@@ -1,180 +1,457 @@
 using System;
+using System.Collections.Generic;
+using System.ComponentModel;
+using System.Drawing;
 using System.IO;
 using System.Linq;
-using System.Text.Json;
 using System.Windows.Forms;
 
 namespace Cronator
 {
-    internal class SettingsForm : Form
+    public sealed class SettingsForm : Form
     {
-        private ComboBox cboMonitor = new();
-        private NumericUpDown numInterval = new();
+        private readonly SplitContainer _split;
+        private readonly TreeView _nav;
+        private readonly Panel _contentHost;
 
-        private CheckBox chkClock = new();
-        private ComboBox cboClockPos = new();
-        private TextBox txtClockFormat = new();
-        private NumericUpDown numClockFont = new();
+        private readonly List<WidgetInfo> _widgets; // supply from your loader
+        private Control? _currentPage;
 
-        private Button btnApply = new();
-        private Button btnClose = new();
-
-        // Paths / model
-        private readonly string _clockFolder;
-        private readonly string _clockConfigPath;
-
-        private ClockConfig _clock = new();
-
-        public SettingsForm()
+        // Replace the existing ctor with this:
+        public SettingsForm(List<WidgetInfo>? widgets = null)
         {
+            _widgets = widgets ?? new List<WidgetInfo>();
+
             Text = "Cronator Settings";
-            FormBorderStyle = FormBorderStyle.FixedDialog;
-            MaximizeBox = false;
             StartPosition = FormStartPosition.CenterScreen;
-            Width = 420;
-            Height = 360;
+            MinimumSize = new Size(900, 600);
 
-            // Resolve config path
-            var baseDir = AppContext.BaseDirectory;
-            _clockFolder = Path.Combine(baseDir, "assets", "widgets", "clock");
-            _clockConfigPath = Path.Combine(_clockFolder, "config.json");
-
-            // --- Monitor ---
-            var lblMon = new Label { Text = "Monitor:", Left = 16, Top = 20, Width = 120 };
-            cboMonitor.Left = 140; cboMonitor.Top = 16; cboMonitor.Width = 240;
-
-            // --- Timer ---
-            var lblInt = new Label { Text = "Timer (s):", Left = 16, Top = 60, Width = 120 };
-            numInterval.Left = 140; numInterval.Top = 56; numInterval.Width = 80;
-            numInterval.Minimum = 0; // 0 = off
-            numInterval.Maximum = 3600;
-            numInterval.Value = 0;
-
-            // --- Clock toggle ---
-            var grpClock = new GroupBox { Text = "Clock widget", Left = 12, Top = 96, Width = 380, Height = 180 };
-
-            var lblClock = new Label { Text = "Show clock:", Left = 12, Top = 28, Width = 120, Parent = grpClock };
-            chkClock.Left = 140; chkClock.Top = 26; chkClock.Width = 20; chkClock.Parent = grpClock;
-
-            var lblClockPos = new Label { Text = "Position:", Left = 12, Top = 64, Width = 120, Parent = grpClock };
-            cboClockPos.Left = 140; cboClockPos.Top = 60; cboClockPos.Width = 200; cboClockPos.Parent = grpClock;
-            cboClockPos.DropDownStyle = ComboBoxStyle.DropDownList;
-            cboClockPos.Items.AddRange(new object[] { "UpperLeft", "UpperRight", "LowerLeft", "LowerRight", "Center" });
-
-            var lblFormat = new Label { Text = "Format:", Left = 12, Top = 100, Width = 120, Parent = grpClock };
-            txtClockFormat.Left = 140; txtClockFormat.Top = 96; txtClockFormat.Width = 200; txtClockFormat.Parent = grpClock;
-            txtClockFormat.PlaceholderText = "e.g., HH:mm:ss";
-
-            var lblFont = new Label { Text = "Font size (px):", Left = 12, Top = 136, Width = 120, Parent = grpClock };
-            numClockFont.Left = 140; numClockFont.Top = 132; numClockFont.Width = 100; numClockFont.Parent = grpClock;
-            numClockFont.Minimum = 0;     // 0 = auto
-            numClockFont.Maximum = 256;
-            numClockFont.Value = 0;
-
-            // --- Buttons ---
-            btnApply.Text = "Apply";
-            btnApply.Left = 232; btnApply.Top = 290; btnApply.Width = 75;
-            btnApply.Click += (_, __) => Apply();
-
-            btnClose.Text = "Close";
-            btnClose.Left = 317; btnClose.Top = 290; btnClose.Width = 75;
-            btnClose.Click += (_, __) => Close();
-
-            Controls.AddRange(new Control[]
+            _split = new SplitContainer
             {
-                lblMon, cboMonitor,
-                lblInt, numInterval,
-                grpClock,
-                btnApply, btnClose
+                Dock = DockStyle.Fill,
+                FixedPanel = FixedPanel.Panel1,
+                SplitterDistance = 220,
+                Panel1MinSize = 180
+            };
+            Controls.Add(_split);
+
+            _nav = new TreeView
+            {
+                Dock = DockStyle.Fill,
+                HideSelection = false,
+                FullRowSelect = true,
+                ShowLines = false,
+                BorderStyle = BorderStyle.None
+            };
+            _nav.AfterSelect += Nav_AfterSelect;
+            _split.Panel1.Controls.Add(_nav);
+
+            _contentHost = new Panel { Dock = DockStyle.Fill, BackColor = SystemColors.Window };
+            _split.Panel2.Controls.Add(_contentHost);
+
+            BuildNav();
+
+            // default selection: Widgets → else first node
+            var widgetsNode = _nav.Nodes.Cast<TreeNode?>()
+                .FirstOrDefault(n => string.Equals(n?.Tag as string, "widgets", StringComparison.OrdinalIgnoreCase));
+            if (widgetsNode is not null)
+            {
+                _nav.SelectedNode = widgetsNode;
+            }
+            else if (_nav.Nodes.Count > 0)
+            {
+                _nav.SelectedNode = _nav.Nodes[0];
+            }
+        }
+
+
+        private void BuildNav()
+        {
+            _nav.Nodes.Clear();
+            _nav.Nodes.Add(new TreeNode("General")  { Tag = "general"  });
+            _nav.Nodes.Add(new TreeNode("Monitors") { Tag = "monitors" });
+            _nav.Nodes.Add(new TreeNode("Widgets")  { Tag = "widgets"  });
+            _nav.ExpandAll();
+        }
+
+        private void Nav_AfterSelect(object? sender, TreeViewEventArgs e)
+        {
+            var node = e.Node;
+            if (node is null) { ShowPage(new PlaceholderPage("Select an item on the left.")); return; }
+
+            var tag = node.Tag as string;
+            if (string.IsNullOrWhiteSpace(tag)) { ShowPage(new PlaceholderPage("Select an item on the left.")); return; }
+
+            switch (tag)
+            {
+                case "widgets":
+                    ShowPage(new WidgetsGridPage(_widgets, OpenWidgetEditor));
+                    break;
+                case "general":
+                    ShowPage(new PlaceholderPage("General settings coming soon."));
+                    break;
+                case "monitors":
+                    ShowPage(new PlaceholderPage("Monitor layout & selection."));
+                    break;
+                default:
+                    ShowPage(new PlaceholderPage("Select an item on the left."));
+                    break;
+            }
+        }
+
+        private void ShowPage(Control page)
+        {
+            if (_currentPage != null)
+            {
+                _contentHost.Controls.Remove(_currentPage);
+                _currentPage.Dispose();
+                _currentPage = null;
+            }
+            _currentPage = page;
+            page.Dock = DockStyle.Fill;
+            _contentHost.Controls.Add(page);
+        }
+
+        private void OpenWidgetEditor(WidgetInfo info)
+        {
+            ShowPage(new WidgetEditorPage(
+                info ?? new WidgetInfo(),
+                onApply: () =>
+                {
+                    WidgetPersistence.SaveUserConfig(info ?? new WidgetInfo());
+                    try { Program.TrayUpdateOnce(); } catch { /* non-fatal */ }
+                },
+                onBack: () =>
+                {
+                    var widgetsNode = _nav.Nodes.Cast<TreeNode?>()
+                        .FirstOrDefault(n => string.Equals(n?.Tag as string, "widgets", StringComparison.OrdinalIgnoreCase));
+                    if (widgetsNode is not null)
+                        _nav.SelectedNode = widgetsNode;
+                    else
+                        ShowPage(new WidgetsGridPage(_widgets, OpenWidgetEditor));
+                }));
+        }
+    }
+
+    // ---------- “Widgets” grid page ----------
+    internal sealed class WidgetsGridPage : UserControl
+    {
+        private readonly ListView _lv;
+        private readonly ImageList _images;
+        private readonly List<WidgetInfo> _widgets;
+        private readonly Action<WidgetInfo> _open;
+
+        public WidgetsGridPage(List<WidgetInfo> widgets, Action<WidgetInfo> openEditor)
+        {
+            _widgets = widgets ?? new List<WidgetInfo>();
+            _open = openEditor ?? (_ => { });
+
+            var header = new Label
+            {
+                Text = "Widgets",
+                Font = new Font("Segoe UI", 14, FontStyle.Bold),
+                Dock = DockStyle.Top,
+                Padding = new Padding(12),
+                Height = 44
+            };
+            Controls.Add(header);
+
+            _images = new ImageList { ImageSize = new Size(48, 48), ColorDepth = ColorDepth.Depth32Bit };
+            _lv = new ListView
+            {
+                Dock = DockStyle.Fill,
+                View = View.LargeIcon,
+                LargeImageList = _images,
+                BorderStyle = BorderStyle.None
+            };
+
+            _lv.ItemActivate += (s, e) =>
+            {
+                if (_lv.SelectedItems.Count == 0) return;
+                var item = _lv.SelectedItems[0];
+                if (item is null) return;
+                if (item.Tag is not WidgetInfo info) return;
+                _open(info);
+            };
+
+            Controls.Add(_lv);
+
+            Populate();
+        }
+
+        private void Populate()
+        {
+            _lv.BeginUpdate();
+            try
+            {
+                _lv.Items.Clear();
+                _images.Images.Clear();
+
+                foreach (var w in _widgets.OrderBy(x => x.DisplayName ?? "", StringComparer.OrdinalIgnoreCase))
+                {
+                    var idx = _images.Images.Count;
+                    _images.Images.Add(w.Icon ?? SystemIcons.Information.ToBitmap());
+
+                    var it = new ListViewItem
+                    {
+                        Text = $"{(string.IsNullOrWhiteSpace(w.DisplayName) ? "(unnamed)" : w.DisplayName)} {(w.Enabled ? "✓" : "✕")}",
+                        ImageIndex = idx,
+                        Tag = w
+                    };
+                    _lv.Items.Add(it);
+                }
+            }
+            finally
+            {
+                _lv.EndUpdate();
+            }
+        }
+    }
+
+    // ---------- Widget editor page ----------
+    internal sealed class WidgetEditorPage : UserControl
+    {
+        private readonly WidgetInfo _info;
+        private readonly PropertyGrid _grid;
+        private readonly CheckBox _enabled;
+        private readonly Button _apply;
+        private readonly Button _back;
+
+        private readonly DynamicSettingsObject _dynamicSettings;
+
+        public WidgetEditorPage(WidgetInfo info, Action onApply, Action onBack)
+        {
+            _info = info ?? new WidgetInfo();
+            onApply ??= static () => { };
+            onBack  ??= static () => { };
+
+            var header = new Panel { Dock = DockStyle.Top, Height = 64, Padding = new Padding(12) };
+            var icon = new PictureBox
+            {
+                Size = new Size(40, 40),
+                SizeMode = PictureBoxSizeMode.Zoom,
+                Image = _info.Icon ?? SystemIcons.Information.ToBitmap()
+            };
+            var title = new Label
+            {
+                AutoSize = true,
+                Font = new Font("Segoe UI", 12, FontStyle.Bold),
+                Text = $"{(_info.DisplayName ?? "(unnamed)")}  {_info.Version}"
+            };
+            _enabled = new CheckBox { AutoSize = true, Text = "Enabled", Checked = _info.Enabled, Left = 0, Top = 34 };
+
+            var headLayout = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.LeftToRight, WrapContents = false, AutoSize = false };
+            headLayout.Controls.Add(icon);
+            headLayout.Controls.Add(new Panel { Width = 8 });
+            headLayout.Controls.Add(new FlowLayoutPanel
+            {
+                FlowDirection = FlowDirection.TopDown,
+                WrapContents = false,
+                AutoSize = true,
+                Controls = { title, _enabled }
             });
+            header.Controls.Add(headLayout);
+            Controls.Add(header);
 
-            // populate monitors
-            var mons = Program.TrayGetMonitorList();
-            foreach (var (index, label) in mons.Select((l, i) => (i, l)))
-                cboMonitor.Items.Add($"{index}: {label}");
-            if (cboMonitor.Items.Count > 0)
-                cboMonitor.SelectedIndex = Math.Max(0, Math.Min(Program.TrayGetSelectedMonitorIndex(), cboMonitor.Items.Count - 1));
+            _grid = new PropertyGrid { Dock = DockStyle.Fill, HelpVisible = true, ToolbarVisible = false };
+            Controls.Add(_grid);
 
-            // load clock config
-            LoadClockConfigIntoUI();
+            var footer = new Panel { Dock = DockStyle.Bottom, Height = 48, Padding = new Padding(12) };
+            _apply = new Button { Text = "Apply", AutoSize = true };
+            _back  = new Button { Text = "Back",  AutoSize = true, Left = 90 };
+
+            // >>> IMPORTANT: create _dynamicSettings BEFORE wiring handlers that use it <<<
+            _dynamicSettings = new DynamicSettingsObject(_info);
+            _grid.SelectedObject = _dynamicSettings;
+
+            _apply.Click += (s, e) =>
+            {
+                _info.Enabled = _enabled.Checked;
+
+                _info.UserSettings ??= new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
+                _dynamicSettings.CopyToDictionary(_info.UserSettings);
+
+                _info.EffectiveSettings ??= new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
+                _info.EffectiveSettings = WidgetPersistence.MergeSettings(_info);
+
+                onApply();
+            };
+            _back.Click += (s, e) => onBack();
+
+            footer.Controls.Add(_apply);
+            footer.Controls.Add(_back);
+            Controls.Add(footer);
         }
+    }
 
-        private void LoadClockConfigIntoUI()
+    // ---------- PropertyGrid dynamic backing object ----------
+    internal sealed class DynamicSettingsObject : ICustomTypeDescriptor
+    {
+        private readonly WidgetInfo _info;
+        private readonly Dictionary<string, object?> _working = new(StringComparer.OrdinalIgnoreCase);
+
+        public DynamicSettingsObject(WidgetInfo info)
         {
-            try
+            _info = info ?? new WidgetInfo();
+
+            _info.UserSettings      ??= new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
+            _info.EffectiveSettings ??= new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
+
+            foreach (var kv in _info.UserSettings)
+                _working[kv.Key ?? string.Empty] = kv.Value;
+
+            foreach (var kv in _info.EffectiveSettings)
             {
-                Directory.CreateDirectory(_clockFolder);
-
-                if (File.Exists(_clockConfigPath))
-                {
-                    var json = File.ReadAllText(_clockConfigPath);
-                    _clock = JsonSerializer.Deserialize<ClockConfig>(json) ?? new ClockConfig();
-                }
-                else
-                {
-                    _clock = new ClockConfig(); // defaults, first run
-                    File.WriteAllText(_clockConfigPath, JsonSerializer.Serialize(_clock, new JsonSerializerOptions { WriteIndented = true }));
-                }
+                var key = kv.Key ?? string.Empty;
+                if (!_working.ContainsKey(key))
+                    _working[key] = kv.Value;
             }
-            catch (Exception ex)
-            {
-                MessageBox.Show(this, "Failed to load clock config: " + ex.Message, "Cronator", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                _clock = new ClockConfig();
-            }
-
-            chkClock.Checked = _clock.Enabled;
-            var posName = _clock.Position?.ToString() ?? "UpperRight";
-            var posIdx = cboClockPos.Items.IndexOf(posName);
-            cboClockPos.SelectedIndex = posIdx >= 0 ? posIdx : cboClockPos.Items.IndexOf("UpperRight");
-
-            txtClockFormat.Text = string.IsNullOrWhiteSpace(_clock.Format) ? "HH:mm:ss" : _clock.Format;
-            numClockFont.Value = (decimal)Math.Max(0, _clock.FontSize);
         }
 
-        private void Apply()
+        public void CopyToDictionary(Dictionary<string, object?> target)
         {
-            // monitor
-            if (cboMonitor.SelectedIndex >= 0)
-                Program.TraySelectMonitor(cboMonitor.SelectedIndex);
-
-            // user auto-timer
-            int sec = (int)numInterval.Value;
-            Program.TraySetTimer(sec > 0 ? sec : (int?)null);
-
-            // widgets -> save clock config
-            try
-            {
-                var pos = (string)(cboClockPos.SelectedItem ?? "UpperRight");
-                _clock.Enabled = chkClock.Checked;
-                _clock.Position = Enum.TryParse<WidgetPosition>(pos, out var wp) ? wp : WidgetPosition.UpperRight;
-                _clock.Format = string.IsNullOrWhiteSpace(txtClockFormat.Text) ? "HH:mm:ss" : txtClockFormat.Text.Trim();
-                _clock.FontSize = (float)numClockFont.Value; // 0 = auto
-
-                Directory.CreateDirectory(_clockFolder);
-                var json = JsonSerializer.Serialize(_clock, new JsonSerializerOptions { WriteIndented = true });
-                File.WriteAllText(_clockConfigPath, json);
-            }
-            catch (Exception ex)
-            {
-                MessageBox.Show(this, "Failed to save clock config: " + ex.Message, "Cronator", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                return;
-            }
-
-            // force a visible update
-            Program.TrayUpdateOnce();
-
-            MessageBox.Show(this, "Applied.", "Cronator", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            if (target is null) return;
+            target.Clear();
+            foreach (var kv in _working) target[kv.Key] = kv.Value;
         }
 
-        // ----- local DTOs (mirror Program.cs) -----
-        private enum WidgetPosition { UpperLeft, UpperRight, LowerLeft, LowerRight, Center }
+        public AttributeCollection GetAttributes() => AttributeCollection.Empty;
+        public string GetClassName() => (_info.DisplayName ?? "Widget") + " Settings";
+        public string GetComponentName() => _info.DisplayName ?? "Widget";
+        public TypeConverter GetConverter() => new TypeConverter();
+        public EventDescriptor? GetDefaultEvent() => null;
+        public PropertyDescriptor? GetDefaultProperty() => null;
+        public object? GetEditor(Type editorBaseType) => null;
+        public EventDescriptorCollection GetEvents(Attribute[]? attributes) => EventDescriptorCollection.Empty;
+        public EventDescriptorCollection GetEvents() => EventDescriptorCollection.Empty;
+        public PropertyDescriptorCollection GetProperties(Attribute[]? attributes) => GetProperties();
 
-        private sealed class ClockConfig
+        public PropertyDescriptorCollection GetProperties()
         {
-            public bool Enabled { get; set; } = true;
-            public WidgetPosition? Position { get; set; } = WidgetPosition.UpperRight;
-            public float FontSize { get; set; } = 0; // 0 = auto
-            public string Format { get; set; } = "HH:mm:ss";
+            var keys = _working.Keys
+                .Where(k => !string.IsNullOrWhiteSpace(k))
+                .Select(k => k!)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+
+            Array.Sort(keys, StringComparer.OrdinalIgnoreCase);
+
+            var props = new PropertyDescriptor[keys.Length];
+            for (int i = 0; i < keys.Length; i++)
+            {
+                var key = keys[i];
+                props[i] = new DictPropertyDescriptor(key, _working);
+            }
+            return new PropertyDescriptorCollection(props, readOnly: true);
         }
+
+        public object? GetPropertyOwner(PropertyDescriptor? pd) => this;
+
+        private sealed class DictPropertyDescriptor : PropertyDescriptor
+        {
+            private readonly string _key;
+            private readonly Dictionary<string, object?> _dict;
+
+            public DictPropertyDescriptor(string key, Dictionary<string, object?> dict)
+                : base(key ?? string.Empty, BuildAttributes(key ?? string.Empty, dict))
+            {
+                _key = key ?? string.Empty;
+                _dict = dict ?? throw new ArgumentNullException(nameof(dict));
+            }
+
+            public override bool CanResetValue(object? component) => false;
+            public override Type ComponentType => typeof(DynamicSettingsObject);
+            public override object? GetValue(object? component) => _dict.TryGetValue(_key, out var v) ? v : null;
+            public override bool IsReadOnly => false;
+            public override Type PropertyType => InferType(GetValue(null));
+            public override void ResetValue(object? component) { }
+            public override void SetValue(object? component, object? value)
+            {
+                _dict[_key] = value;
+                OnValueChanged(component, EventArgs.Empty);
+            }
+            public override bool ShouldSerializeValue(object? component) => true;
+
+            private static Attribute[] BuildAttributes(string key, Dictionary<string, object?> dict)
+            {
+                dict.TryGetValue(key, out var val);
+                if (val is Color)
+                    return new Attribute[] { new TypeConverterAttribute(typeof(ColorConverter)) };
+                return Array.Empty<Attribute>();
+            }
+
+            private static Type InferType(object? v)
+            {
+                if (v is null) return typeof(string);
+                return v.GetType();
+            }
+        }
+    }
+
+    // ---------- Placeholder simple page ----------
+    internal sealed class PlaceholderPage : UserControl
+    {
+        public PlaceholderPage(string text)
+        {
+            Controls.Add(new Label
+            {
+                Text = text,
+                Dock = DockStyle.Fill,
+                TextAlign = ContentAlignment.MiddleCenter,
+                Font = new Font("Segoe UI", 11, FontStyle.Regular)
+            });
+        }
+    }
+
+    // ---------- Widget persistence helpers ----------
+    public static class WidgetPersistence
+    {
+        public static void SaveUserConfig(WidgetInfo info)
+        {
+            if (info is null) return;
+
+            info.FolderPath ??= string.Empty;
+            if (string.IsNullOrWhiteSpace(info.FolderPath) || !Directory.Exists(info.FolderPath)) return;
+
+            info.UserSettings ??= new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
+
+            var path = Path.Combine(info.FolderPath, "config.user.json");
+            var payload = new
+            {
+                enabled = info.Enabled,
+                settings = info.UserSettings
+            };
+            var json = System.Text.Json.JsonSerializer.Serialize(payload,
+                new System.Text.Json.JsonSerializerOptions { WriteIndented = true });
+            File.WriteAllText(path, json);
+        }
+
+        public static Dictionary<string, object?> MergeSettings(WidgetInfo info)
+        {
+            var effective = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
+
+            if (info.EffectiveSettings != null)
+                foreach (var kv in info.EffectiveSettings) effective[kv.Key] = kv.Value;
+
+            if (info.UserSettings != null)
+                foreach (var kv in info.UserSettings) effective[kv.Key] = kv.Value;
+
+            return effective;
+        }
+    }
+
+    // ---------- WidgetInfo ----------
+    public sealed class WidgetInfo
+    {
+        public string Id = "";
+        public string DisplayName = "";
+        public string Version = "";
+        public string FolderPath = "";
+        public string AssemblyPath = "";
+        public string? TypeName;
+        public bool Enabled;
+        public Dictionary<string, object?> EffectiveSettings = new(StringComparer.OrdinalIgnoreCase);
+        public Dictionary<string, object?> UserSettings = new(StringComparer.OrdinalIgnoreCase);
+        public Image? Icon;
     }
 }
