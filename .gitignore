@@ -1,1 +1,112 @@
-bin
+# -----------------------------
+# OS noise
+# -----------------------------
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# -----------------------------
+# IDE / editor
+# -----------------------------
+.vs/
+.vscode/
+.idea/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+_ReSharper*/
+*.DotSettings.user
+*.ncrunch*
+*.orig
+
+# -----------------------------
+# .NET / build outputs
+# -----------------------------
+bin/
+obj/
+[Bb]uild/
+[Ll]og/
+artifacts/
+TestResults/
+*.log
+*.tlog
+*.pdb
+*.dll
+*.exe
+*.cache
+*.ilk
+*.iobj
+*.ipdb
+
+# Don’t keep publish artifacts
+publish/
+*.Publish.xml
+
+# Runtime configs (machine-local)
+*.runtimeconfig.dev.json
+
+# NuGet
+packages/
+*.nupkg
+*.snupkg
+.nuget/
+**/project.lock.json
+*.deps.json
+project.assets.json
+package-lock.json
+
+# Coverage
+coverage*/
+*.coverage
+*.coveragexml
+lcov.info
+
+# -----------------------------
+# Repo-specific: keep source, ignore compiled plugin/tab outputs
+# -----------------------------
+# Keep manifests, icons, source, csproj — just drop built stuff under assets/**
+assets/**/bin/
+assets/**/obj/
+assets/**/ref/
+assets/**/refint/
+assets/**/net*-windows/
+assets/**/net*/ref/
+assets/**/net*/refint/
+
+# Built binaries under assets (widgets/tabs) – ignore
+assets/**/*.dll
+assets/**/*.pdb
+assets/**/*.deps.json
+
+# Per-user config files you don’t want in git
+**/config.user.json
+
+# Temp wallpaper/cache the app creates (if checked in by accident)
+cronator_wall/
+temp/
+tmp/
+*.tmp
+
+# -----------------------------
+# Rider/JetBrains caches
+# -----------------------------
+*.iml
+.idea/**/workspace.xml
+.idea/**/tasks.xml
+.idea/**/dataSources/
+.idea/**/dataSources.ids
+.idea/**/dataSources.local.xml
+.idea/**/sqlDataSources.xml
+.idea/**/dynamic.xml
+.idea/**/uiDesigner.xml
+.idea/**/gradle.xml
+.idea/**/libraries
+
+# -----------------------------
+# Misc
+# -----------------------------
+*.sln.ide
+*.sln.cache
+*.swp
+*.swo
