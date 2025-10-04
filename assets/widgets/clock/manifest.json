@@ -1,16 +1,17 @@
 {
   "name": "clock",
   "displayName": "Clock",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "enabled": true,
   "kind": "dll",
-  "assembly": "net8.0-windows/ClockWidget.dll",
-  "type": "CronatorWidgets.Clock.ClockWidget",
+  "assembly": "ClockWidget.dll",
+  "type": "ClockWidgetNS.ClockWidget",
   "settings": {
-    "position": "UpperRight",
     "format": "HH:mm:ss",
+    "position": "UpperRight",
     "fontSize": 0,
     "color": "#FFFFFFFF",
-    "shadow": true
+    "shadow": true,
+    "bg": false
   }
 }

@@ -22,16 +22,17 @@ namespace Cronator
 
         private const int SPI_SETDESKWALLPAPER = 0x0014;
         private const int SPI_GETDESKWALLPAPER = 0x0073;
-        private const int SPIF_UPDATEINIFILE = 0x0001;
-        private const int SPIF_SENDCHANGE     = 0x0002;
+        private const int SPIF_UPDATEINIFILE   = 0x0001;
+        private const int SPIF_SENDCHANGE      = 0x0002;
 
         private static bool ApplyWallpaperAll(string path)
         {
+            // Explorer sometimes needs a tiny nudge
             for (int i = 0; i < 2; i++)
             {
                 if (SystemParametersInfo(SPI_SETDESKWALLPAPER, 0, path, SPIF_UPDATEINIFILE | SPIF_SENDCHANGE))
                     return true;
-                Thread.Sleep(100);
+                Thread.Sleep(80);
             }
             return false;
         }
@@ -123,37 +124,21 @@ namespace Cronator
         private static int _monIndex = -1;
 
         private static CancellationTokenSource? _ticker;      // optional user timer
-        private static CancellationTokenSource? _clockTicker; // 1s widget tick
+        private static CancellationTokenSource? _clockTicker; // second-aligned tick
         private static volatile bool _restored;
         private static readonly object _lock = new();
 
         // ===== Widgets =====
         private static readonly WidgetManager _widgets = new();
 
-        // Stable SPAN target (never changes name)
+        // ===== Smooth composite cache (SPAN) =====
+        private static readonly object _paintLock = new();
+        private static Bitmap? _cachedBase;                // wallpaper base (virtual screen, no widgets)
+        private static int _baseW, _baseH;                 // size of _cachedBase
+        private static Rectangle _cachedVirt;              // virtual screen used when building base
+        private static int _lastSecondPainted = -1;        // avoid redundant re-draws
         private static readonly string StableSpanPath = Path.Combine(TempDir, "cronator_span.bmp");
         private static bool _spanStyleSet;
-
-        // ===== Debug overlay helpers (for visible testing) =====
-        private static readonly Color[] _palette = new[]
-        {
-            Color.FromArgb(160, 255, 59, 48),   // red-ish
-            Color.FromArgb(160, 255, 159, 10),  // orange
-            Color.FromArgb(160, 255, 214, 10),  // yellow
-            Color.FromArgb(160, 52, 199, 89),   // green
-            Color.FromArgb(160, 0, 122, 255),   // blue
-            Color.FromArgb(160, 175, 82, 222),  // purple
-            Color.FromArgb(160, 90, 200, 250),  // light blue
-        };
-        private static int _paletteIdx = 0;
-
-        private static Color NextColor()
-        {
-            _paletteIdx = (_paletteIdx + 1) % _palette.Length;
-            return _palette[_paletteIdx];
-        }
-
-
 
         [STAThread]
         private static void Main()
@@ -203,11 +188,15 @@ namespace Cronator
                 {
                     SelectMonitorSPAN(0, screens);
                     LoadWidgetsForCurrentMonitor(screens[0].Bounds);
-                    UpdateSelectedSPAN(screens);
+
+                    // Build base and point Explorer once at stable file
+                    RebuildBaseComposite(screens);
+                    ApplySpanStyleSetOnce();
+                    UpdateSelectedSPAN(screens, initialApply: true);
                 }
             }
 
-            // 1-second widget tick (e.g., clock)
+            // Second-aligned widget tick
             StartClockTimer();
 
             // Tray (embedded assets)
@@ -256,13 +245,16 @@ namespace Cronator
                             var screens = System.Windows.Forms.Screen.AllScreens.ToList();
                             SelectMonitorSPAN(idx, screens);
                             LoadWidgetsForCurrentMonitor(screens[Math.Max(0, Math.Min(idx, screens.Count - 1))].Bounds);
-                            UpdateSelectedSPAN(screens);
+
+                            // Rebuild base when selection/layout changes
+                            RebuildBaseComposite(screens);
+                            UpdateSelectedSPAN(screens, initialApply: false);
                         }
                     }
                     else if (cmd == "u")
                     {
                         if (_dw != null) { ListMonitorsCOM(out var ids, out var rects); UpdateSelectedCOM(ids, rects); }
-                        else { var screens = System.Windows.Forms.Screen.AllScreens.ToList(); UpdateSelectedSPAN(screens); }
+                        else { var screens = System.Windows.Forms.Screen.AllScreens.ToList(); UpdateSelectedSPAN(screens, initialApply: false); }
                     }
                     else if (cmd == "t" && parts.Length >= 2 && int.TryParse(parts[1], out var sec) && sec > 0)
                     {
@@ -320,6 +312,12 @@ namespace Cronator
 
                 try
                 {
+                    // Dispose cache
+                    lock (_paintLock)
+                    {
+                        _cachedBase?.Dispose(); _cachedBase = null;
+                    }
+
                     if (!string.IsNullOrWhiteSpace(_backupWallLocal) && File.Exists(_backupWallLocal))
                     {
                         using var key = Registry.CurrentUser.OpenSubKey(@"Control Panel\Desktop", true);
@@ -341,10 +339,10 @@ namespace Cronator
                         Console.WriteLine("No wallpaper backup found; leaving current image.");
                     }
 
-                    // cleanup temp BMPs
+                    // cleanup temp files
                     if (Directory.Exists(TempDir))
                     {
-                        foreach (var f in Directory.GetFiles(TempDir, "*.bmp"))
+                        foreach (var f in Directory.GetFiles(TempDir))
                             try { File.Delete(f); } catch { }
                     }
                 }
@@ -365,7 +363,7 @@ namespace Cronator
                     try
                     {
                         if (_dw != null) { ListMonitorsCOM(out var ids, out var rects); UpdateSelectedCOM(ids, rects); }
-                        else { var screens = System.Windows.Forms.Screen.AllScreens.ToList(); UpdateSelectedSPAN(screens); }
+                        else { var screens = System.Windows.Forms.Screen.AllScreens.ToList(); UpdateSelectedSPAN(screens, initialApply: false); }
                     }
                     catch { }
                     try { await Task.Delay(TimeSpan.FromSeconds(sec), _ticker.Token); }
@@ -378,23 +376,53 @@ namespace Cronator
             if (_ticker != null) { _ticker.Cancel(); _ticker.Dispose(); _ticker = null; Console.WriteLine("Timer stopped."); }
         }
 
-        // ===== 1-second widget tick =====
+        // ===== Second-aligned widget tick =====
         private static void StartClockTimer()
         {
             StopClockTimer();
             _clockTicker = new CancellationTokenSource();
+
             _ = Task.Run(async () =>
             {
-                while (!_clockTicker!.IsCancellationRequested)
+                var token = _clockTicker!.Token;
+                while (!token.IsCancellationRequested)
                 {
                     try
                     {
-                        if (_dw != null) { ListMonitorsCOM(out var ids, out var rects); UpdateSelectedCOM(ids, rects); }
-                        else { var screens = System.Windows.Forms.Screen.AllScreens.ToList(); UpdateSelectedSPAN(screens); }
+                        // Align to next second boundary
+                        var now = DateTime.Now;
+                        int msToNextSecond = 1000 - now.Millisecond;
+                        if (msToNextSecond < 1) msToNextSecond = 1;
+                        await Task.Delay(msToNextSecond, token);
+
+                        int sec = DateTime.Now.Second;
+                        if (sec == _lastSecondPainted) continue;
+                        _lastSecondPainted = sec;
+
+                        if (_dw != null)
+                        {
+                            ListMonitorsCOM(out var ids, out var rects);
+                            UpdateSelectedCOM(ids, rects);
+                        }
+                        else
+                        {
+                            var screens = System.Windows.Forms.Screen.AllScreens.ToList();
+
+                            // Rebuild base if virtual screen changed
+                            var virt = System.Windows.Forms.SystemInformation.VirtualScreen;
+                            if (_cachedBase == null || _baseW != virt.Width || _baseH != virt.Height)
+                            {
+                                RebuildBaseComposite(screens);
+                                UpdateSelectedSPAN(screens, initialApply: true); // re-apply once if size changed
+                            }
+                            else
+                            {
+                                UpdateSelectedSPAN(screens, initialApply: false);
+                            }
+                        }
                     }
-                    catch { }
-                    try { await Task.Delay(TimeSpan.FromSeconds(1), _clockTicker.Token); }
-                    catch { break; }
+                    catch (TaskCanceledException) { break; }
+                    catch { /* ignore one blip */ }
                 }
             });
         }
@@ -453,10 +481,7 @@ namespace Cronator
                 using var bmp = new Bitmap(w, h);
                 using (var g = Graphics.FromImage(bmp))
                 {
-                    // In COM mode we don't know the global wallpaper; use a neutral base.
                     g.Clear(Color.Black);
-
-                    // Draw all widgets (monitorRect = whole bmp; virt = whole bmp)
                     _widgets.DrawAll(g, new Rectangle(0, 0, w, h), new Rectangle(0, 0, w, h), DateTime.Now);
                 }
                 bmp.Save(outBmp, ImageFormat.Bmp);
@@ -471,8 +496,8 @@ namespace Cronator
         private static void ListMonitorsSPAN(List<System.Windows.Forms.Screen> screens)
         {
             Console.WriteLine($"Monitors found (SPAN): {screens.Count}");
-            var virt = System.Windows.Forms.SystemInformation.VirtualScreen;
-            Console.WriteLine($"  Virtual: ({virt.Left},{virt.Top})–({virt.Right},{virt.Bottom}) size={virt.Width}x{virt.Height}");
+            var vs = System.Windows.Forms.SystemInformation.VirtualScreen;
+            Console.WriteLine($"  Virtual: ({vs.Left},{vs.Top})–({vs.Right},{vs.Bottom}) size={vs.Width}x{vs.Height}");
             for (int i = 0; i < screens.Count; i++)
             {
                 var b = screens[i].Bounds;
@@ -488,9 +513,12 @@ namespace Cronator
             var b = screens[index].Bounds;
             Console.WriteLine($"Selected monitor [{index}] (SPAN mode)");
             Console.WriteLine($"  size={b.Width}x{b.Height}, rect=({b.Left},{b.Top})–({b.Right},{b.Bottom})");
+
+            // If selection changes, rebuild base so first tick is instant
+            RebuildBaseComposite(screens);
         }
 
-        private static void EnsureSpanStyleSetOnce()
+        private static void ApplySpanStyleSetOnce()
         {
             if (_spanStyleSet) return;
             try
@@ -503,36 +531,33 @@ namespace Cronator
             catch { }
         }
 
-        private static void UpdateSelectedSPAN(List<System.Windows.Forms.Screen> screens, bool cycleColor = false)
+        private static void RebuildBaseComposite(List<System.Windows.Forms.Screen> screens)
         {
-            if (_monIndex < 0 || _monIndex >= screens.Count) { Console.WriteLine("No monitor selected."); return; }
-
             var virt = System.Windows.Forms.SystemInformation.VirtualScreen;
             int W = virt.Width, H = virt.Height;
-            var selected = screens[_monIndex].Bounds;
 
-            // Always start from the ORIGINAL wallpaper we backed up at launch
+            // Compose from original wallpaper snapshot if available
             Image? baseWall = null;
             if (!string.IsNullOrWhiteSpace(_backupWallLocal) && File.Exists(_backupWallLocal))
                 baseWall = LoadImageUnlocked(_backupWallLocal);
             else if (!string.IsNullOrWhiteSpace(_backupWall) && File.Exists(_backupWall))
                 baseWall = LoadImageUnlocked(_backupWall);
 
-            string outPath = Path.Combine(TempDir, $"cronator_span_{DateTime.Now:yyyyMMdd_HHmmss_fff}.bmp");
-            try
+            lock (_paintLock)
             {
-                using var big = new Bitmap(W, H);
-                using (var g = Graphics.FromImage(big))
+                _cachedBase?.Dispose();
+                _cachedBase = new Bitmap(W, H, PixelFormat.Format32bppPArgb);
+                _baseW = W; _baseH = H; _cachedVirt = virt;
+
+                using (var g = Graphics.FromImage(_cachedBase))
                 {
-                    // Quality
-                    g.SmoothingMode      = SmoothingMode.AntiAlias;
+                    g.SmoothingMode      = SmoothingMode.HighQuality;
                     g.InterpolationMode  = InterpolationMode.HighQualityBicubic;
                     g.PixelOffsetMode    = PixelOffsetMode.HighQuality;
                     g.CompositingQuality = CompositingQuality.HighQuality;
                     g.CompositingMode    = CompositingMode.SourceOver;
                     g.TextRenderingHint  = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
 
-                    // Base wallpaper (Fill on each screen)
                     if (baseWall != null)
                     {
                         foreach (var scr in screens)
@@ -542,54 +567,70 @@ namespace Cronator
                     {
                         g.Clear(Color.Black);
                     }
-
-                    // ---- DEBUG: red frame + host test text, so we know coords are right ----
-                    // int ox = selected.Left - virt.Left;
-                    // int oy = selected.Top  - virt.Top;
-
-                    // using (var pen = new Pen(Color.Red, Math.Max(2, selected.Width / 400)))
-                    //     g.DrawRectangle(pen, ox, oy, selected.Width - 1, selected.Height - 1);
-
-                    // using (var tf = new Font("Segoe UI", Math.Max(22, selected.Height / 18f), FontStyle.Bold, GraphicsUnit.Pixel))
-                    // {
-                    //     string t = "HOST TEST";
-                    //     var sz = g.MeasureString(t, tf);
-                    //     float tx = ox + (selected.Width  - sz.Width)  / 2f;
-                    //     float ty = oy + (selected.Height - sz.Height) / 2f;
-                    //     using var sh = new SolidBrush(Color.FromArgb(180, 0, 0, 0));
-                    //     using var br = new SolidBrush(Color.Lime);
-                    //     g.DrawString(t, tf, sh, tx + 2, ty + 2);
-                    //     g.DrawString(t, tf, br, tx, ty);
-                    // }
-                    // -----------------------------------------------------------------------
-
-                    // Finally: draw all widgets into the selected monitor area
-                    _widgets.DrawAll(g, selected, virt, DateTime.Now);
                 }
+                _lastSecondPainted = -1; // force next tick to repaint
+            }
 
-                if (!SaveBmpWithRetry(big, outPath))
-                {
-                    Console.WriteLine("SPAN update error: failed to save composite.");
-                    return;
-                }
+            baseWall?.Dispose();
+        }
 
-                EnsureSpanStyleSetOnce();
+        private static void UpdateSelectedSPAN(List<System.Windows.Forms.Screen> screens, bool initialApply)
+        {
+            if (_monIndex < 0 || _monIndex >= screens.Count) { Console.WriteLine("No monitor selected."); return; }
 
-                if (!ApplyWallpaperAll(outPath))
+            var virt = System.Windows.Forms.SystemInformation.VirtualScreen;
+            // Rebuild base if needed (virtual size changes)
+            if (_cachedBase == null || _baseW != virt.Width || _baseH != virt.Height)
+                RebuildBaseComposite(screens);
+
+            string tmp = StableSpanPath + ".tmp";
+            try
+            {
+                lock (_paintLock)
                 {
-                    Console.WriteLine($"Failed to set wallpaper (err={Marshal.GetLastWin32Error()}).");
-                }
-                else
-                {
-                    // keep only a few old files
+                    using (var frame = new Bitmap(_baseW, _baseH, PixelFormat.Format32bppPArgb))
+                    using (var g = Graphics.FromImage(frame))
+                    {
+                        g.SmoothingMode      = SmoothingMode.HighQuality;
+                        g.InterpolationMode  = InterpolationMode.HighQualityBicubic;
+                        g.PixelOffsetMode    = PixelOffsetMode.HighQuality;
+                        g.CompositingQuality = CompositingQuality.HighQuality;
+                        g.CompositingMode    = CompositingMode.SourceOver;
+                        g.TextRenderingHint  = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
+
+                        g.DrawImageUnscaled(_cachedBase!, 0, 0);
+
+                        var selected = screens[_monIndex].Bounds;
+                        _widgets.DrawAll(g, selected, _cachedVirt, DateTime.Now);
+
+                        if (!SaveBmpWithRetry(frame, tmp))
+                        {
+                            Console.WriteLine("SPAN update error: failed to save frame.");
+                            return;
+                        }
+                    }
+
+                    // Atomic replace
                     try
                     {
-                        foreach (var f in Directory.EnumerateFiles(TempDir, "cronator_span_*.bmp")
-                                                    .OrderByDescending(f => f).Skip(3))
-                            try { File.Delete(f); } catch { }
+                        if (!File.Exists(StableSpanPath)) File.Move(tmp, StableSpanPath);
+                        else File.Replace(tmp, StableSpanPath, null, true);
                     }
-                    catch { }
+                    catch
+                    {
+                        try
+                        {
+                            if (File.Exists(StableSpanPath)) File.Delete(StableSpanPath);
+                            File.Move(tmp, StableSpanPath);
+                        }
+                        catch { /* last resort */ }
+                    }
                 }
+
+                // Always poke Explorer so it repaints even though the path stayed the same.
+                ApplySpanStyleSetOnce();
+                if (!ApplyWallpaperAll(StableSpanPath))
+                    Console.WriteLine($"Failed to set wallpaper (err={Marshal.GetLastWin32Error()}).");
             }
             catch (Exception ex)
             {
@@ -597,10 +638,9 @@ namespace Cronator
             }
             finally
             {
-                baseWall?.Dispose();
+                try { if (File.Exists(tmp)) File.Delete(tmp); } catch { }
             }
         }
-
 
 
         // ===== Drawing helpers =====
@@ -615,7 +655,7 @@ namespace Cronator
             catch { return null; }
         }
 
-        private static bool SaveBmpWithRetry(Bitmap bmp, string path, int retries = 3, int delayMs = 40)
+        private static bool SaveBmpWithRetry(Bitmap bmp, string path, int retries = 3, int delayMs = 30)
         {
             for (int i = 0; i < retries; i++)
             {
@@ -666,9 +706,10 @@ namespace Cronator
             {
                 var screens = System.Windows.Forms.Screen.AllScreens.ToList();
                 SelectMonitorSPAN(Math.Max(0, Math.Min(index, screens.Count - 1)), screens);
+                RebuildBaseComposite(screens);
+                UpdateSelectedSPAN(screens, initialApply: true);
             }
         }
-
 
         internal static void TraySetTimer(int? seconds)
         {
@@ -679,7 +720,7 @@ namespace Cronator
         internal static void TrayUpdateOnce()
         {
             if (_dw != null) { ListMonitorsCOM(out var ids, out var rects); UpdateSelectedCOM(ids, rects); }
-            else { var screens = System.Windows.Forms.Screen.AllScreens.ToList(); UpdateSelectedSPAN(screens); }
+            else { var screens = System.Windows.Forms.Screen.AllScreens.ToList(); UpdateSelectedSPAN(screens, initialApply: false); }
         }
 
         // ===== Widget loader/manager =====
@@ -718,7 +759,7 @@ namespace Cronator
             public bool    enabled      { get; set; } = false;
             public string? kind         { get; set; }   // "dll"
             public string? assembly     { get; set; }   // "ClockWidget.dll"
-            public string? type         { get; set; }   // "CronatorWidgets.Clock.ClockWidget"
+            public string? type         { get; set; }   // "ClockWidgetNS.ClockWidget"
             public Dictionary<string, object?>? settings { get; set; }
         }
 
@@ -822,7 +863,7 @@ namespace Cronator
                                         Console.WriteLine($"[Widgets] {name}: no exported public types.");
                                     }
                                 }
-                                catch { /* ignore */ }
+                                catch { }
                             }
                         }
 
@@ -878,7 +919,6 @@ namespace Cronator
             }
 
             // ---- helpers ----
-
             private static Type? AutoDetectWidgetType(Assembly asm)
             {
                 try
@@ -905,20 +945,16 @@ namespace Cronator
 
             private static bool TryResolveAssemblyPath(string folder, string asmRelativeOrName, out string fullPath)
             {
-                // 1) Exact relative path
                 var candidate = Path.Combine(folder, asmRelativeOrName);
                 if (File.Exists(candidate)) { fullPath = candidate; return true; }
 
-                // 2) Search for that file name anywhere (handles net8.0-windows subfolder)
                 var fileName = Path.GetFileName(asmRelativeOrName);
-                var found = Directory.GetFiles(folder, fileName, SearchOption.AllDirectories)
-                                    .FirstOrDefault();
+                var found = Directory.GetFiles(folder, fileName, SearchOption.AllDirectories).FirstOrDefault();
                 if (!string.IsNullOrEmpty(found)) { fullPath = found; return true; }
 
-                // 3) Fallback: newest *.dll under folder
                 var anyDll = Directory.GetFiles(folder, "*.dll", SearchOption.AllDirectories)
-                                    .OrderByDescending(File.GetLastWriteTimeUtc)
-                                    .FirstOrDefault();
+                                      .OrderByDescending(File.GetLastWriteTimeUtc)
+                                      .FirstOrDefault();
                 if (!string.IsNullOrEmpty(anyDll))
                 {
                     Console.WriteLine($"[Widgets] {Path.GetFileName(folder)}: using discovered DLL '{Path.GetFileName(anyDll)}'.");
@@ -931,22 +967,20 @@ namespace Cronator
             }
         }
 
-
-
         // ===== Helper to reload widgets for current monitor =====
         private static void LoadWidgetsForCurrentMonitor(RECT r)
         {
-            var sel  = new Rectangle(0, 0, Math.Max(1, r.Right - r.Left), Math.Max(1, r.Bottom - r.Top));
-            var virt = System.Windows.Forms.SystemInformation.VirtualScreen;
+            var sel = new Rectangle(0, 0, Math.Max(1, r.Right - r.Left), Math.Max(1, r.Bottom - r.Top));
+            var vs  = System.Windows.Forms.SystemInformation.VirtualScreen;
             string widgetsRoot = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "assets", "widgets");
-            _widgets.LoadFromFolder(widgetsRoot, sel, virt);
+            _widgets.LoadFromFolder(widgetsRoot, sel, vs);
         }
 
         private static void LoadWidgetsForCurrentMonitor(Rectangle monitorBounds)
         {
-            var virt = System.Windows.Forms.SystemInformation.VirtualScreen;
+            var vs  = System.Windows.Forms.SystemInformation.VirtualScreen;
             string widgetsRoot = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "assets", "widgets");
-            _widgets.LoadFromFolder(widgetsRoot, monitorBounds, virt);
+            _widgets.LoadFromFolder(widgetsRoot, monitorBounds, vs);
         }
     }
 }
