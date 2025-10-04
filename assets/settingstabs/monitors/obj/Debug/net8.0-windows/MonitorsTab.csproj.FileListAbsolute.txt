@@ -1,0 +1,13 @@
+C:\Users\Patrick\Documents\Cronos\cronator\assets\settingstabs\monitors\bin\Debug\net8.0-windows\manifest.json
+C:\Users\Patrick\Documents\Cronos\cronator\assets\settingstabs\monitors\bin\Debug\net8.0-windows\MonitorsTab.deps.json
+C:\Users\Patrick\Documents\Cronos\cronator\assets\settingstabs\monitors\bin\Debug\net8.0-windows\MonitorsTab.dll
+C:\Users\Patrick\Documents\Cronos\cronator\assets\settingstabs\monitors\bin\Debug\net8.0-windows\MonitorsTab.pdb
+C:\Users\Patrick\Documents\Cronos\cronator\assets\settingstabs\monitors\obj\Debug\net8.0-windows\MonitorsTab.GeneratedMSBuildEditorConfig.editorconfig
+C:\Users\Patrick\Documents\Cronos\cronator\assets\settingstabs\monitors\obj\Debug\net8.0-windows\MonitorsTab.AssemblyInfoInputs.cache
+C:\Users\Patrick\Documents\Cronos\cronator\assets\settingstabs\monitors\obj\Debug\net8.0-windows\MonitorsTab.AssemblyInfo.cs
+C:\Users\Patrick\Documents\Cronos\cronator\assets\settingstabs\monitors\obj\Debug\net8.0-windows\MonitorsTab.csproj.CoreCompileInputs.cache
+C:\Users\Patrick\Documents\Cronos\cronator\assets\settingstabs\monitors\obj\Debug\net8.0-windows\MonitorsTab.sourcelink.json
+C:\Users\Patrick\Documents\Cronos\cronator\assets\settingstabs\monitors\obj\Debug\net8.0-windows\MonitorsTab.dll
+C:\Users\Patrick\Documents\Cronos\cronator\assets\settingstabs\monitors\obj\Debug\net8.0-windows\refint\MonitorsTab.dll
+C:\Users\Patrick\Documents\Cronos\cronator\assets\settingstabs\monitors\obj\Debug\net8.0-windows\MonitorsTab.pdb
+C:\Users\Patrick\Documents\Cronos\cronator\assets\settingstabs\monitors\obj\Debug\net8.0-windows\ref\MonitorsTab.dll

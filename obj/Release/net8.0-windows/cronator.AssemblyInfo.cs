@@ -13,7 +13,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("cronator")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Release")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+442bd399f405f92d2d88a1ba9ce5f97851d70d08")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+f8f9396b784392c3014b437c8ce6301027d13037")]
 [assembly: System.Reflection.AssemblyProductAttribute("cronator")]
 [assembly: System.Reflection.AssemblyTitleAttribute("cronator")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]

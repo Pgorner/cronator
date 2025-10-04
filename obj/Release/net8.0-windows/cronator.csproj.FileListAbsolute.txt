@@ -39,9 +39,7 @@ C:\Users\Patrick\Documents\Cronos\cronator\obj\Release\net8.0-windows\ref\cronat
 C:\Users\Patrick\Documents\Cronos\cronator\bin\Release\net8.0-windows\assets\widgets\clock\config.json
 C:\Users\Patrick\Documents\Cronos\cronator\bin\Release\net8.0-windows\assets\logo.gif
 C:\Users\Patrick\Documents\Cronos\cronator\bin\Release\net8.0-windows\assets\logo.ico
-C:\Users\Patrick\Documents\Cronos\cronator\bin\Release\net8.0-windows\assets\widgets\clock\ClockWidget.csproj
 C:\Users\Patrick\Documents\Cronos\cronator\bin\Release\net8.0-windows\assets\widgets\clock\manifest.json
-C:\Users\Patrick\Documents\Cronos\cronator\bin\Release\net8.0-windows\assets\widgets\clock\ClockWidget.cs
 C:\Users\Patrick\Documents\Cronos\cronator\obj\Release\net8.0-windows\cronator.csproj.AssemblyReference.cache
 C:\Users\Patrick\Documents\Cronos\cronator\bin\Release\net8.0-windows\assets\widgets\clock\ClockWidget.deps.json
 C:\Users\Patrick\Documents\Cronos\cronator\bin\Release\net8.0-windows\assets\widgets\clock\ClockWidget.dll
@@ -53,3 +51,9 @@ C:\Users\Patrick\Documents\Cronos\cronator\bin\Release\net8.0-windows\assets\wid
 C:\Users\Patrick\Documents\Cronos\cronator\bin\Release\net8.0-windows\assets\widgets\clock\net8.0-windows\ClockWidget.dll
 C:\Users\Patrick\Documents\Cronos\cronator\bin\Release\net8.0-windows\assets\widgets\clock\net8.0-windows\ClockWidget.pdb
 C:\Users\Patrick\Documents\Cronos\cronator\bin\Release\net8.0-windows\assets\widgets\clock\config.user.json
+C:\Users\Patrick\Documents\Cronos\cronator\bin\Release\net8.0-windows\assets\settingstabs\monitors\manifest.json
+C:\Users\Patrick\Documents\Cronos\cronator\bin\Release\net8.0-windows\manifest.json
+C:\Users\Patrick\Documents\Cronos\cronator\bin\Release\net8.0-windows\MonitorsTab.dll
+C:\Users\Patrick\Documents\Cronos\cronator\bin\Release\net8.0-windows\MonitorsTab.pdb
+C:\Users\Patrick\Documents\Cronos\cronator\bin\Release\net8.0-windows\assets\settingstabs\monitors\MonitorsTab.dll
+C:\Users\Patrick\Documents\Cronos\cronator\bin\Release\net8.0-windows\assets\settingstabs\monitors\MonitorsTab.pdb

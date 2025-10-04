@@ -4,21 +4,35 @@ using System.ComponentModel;
 using System.Drawing;
 using System.IO;
 using System.Linq;
+using System.Reflection;
 using System.Windows.Forms;
+using System.Text.Json;
 
 namespace Cronator
 {
+    // Public so tab DLLs can implement it.
+    public interface ISettingsTab
+    {
+        string Id { get; }
+        string Title { get; }
+        Control? CreateControl();
+    }
+
     public sealed class SettingsForm : Form
     {
         private readonly SplitContainer _split;
         private readonly TreeView _nav;
         private readonly Panel _contentHost;
 
-        private readonly List<WidgetInfo> _widgets; // supply from your loader
+        private readonly List<WidgetInfo> _widgets; // still available for tabs that want it
         private Control? _currentPage;
 
-        // Replace the existing ctor with this:
-        public SettingsForm(List<WidgetInfo>? widgets = null)
+        // NEW: dynamic tabs
+        private readonly TabManager _tabs = new();
+
+        public SettingsForm() : this(new List<WidgetInfo>()) { }
+
+        public SettingsForm(List<WidgetInfo> widgets)
         {
             _widgets = widgets ?? new List<WidgetInfo>();
 
@@ -49,53 +63,86 @@ namespace Cronator
             _contentHost = new Panel { Dock = DockStyle.Fill, BackColor = SystemColors.Window };
             _split.Panel2.Controls.Add(_contentHost);
 
-            BuildNav();
+            // Load tabs from disk
+            BuildNavFromTabs();
+        }
 
-            // default selection: Widgets → else first node
-            var widgetsNode = _nav.Nodes.Cast<TreeNode?>()
-                .FirstOrDefault(n => string.Equals(n?.Tag as string, "widgets", StringComparison.OrdinalIgnoreCase));
-            if (widgetsNode is not null)
+        // add near the top of SettingsForm.cs
+        private static string? FindTabAssembly(string tabFolder, string assemblyFileName)
+        {
+            var candidates = new[]
             {
-                _nav.SelectedNode = widgetsNode;
-            }
-            else if (_nav.Nodes.Count > 0)
-            {
-                _nav.SelectedNode = _nav.Nodes[0];
-            }
+                Path.Combine(tabFolder, assemblyFileName),                         // assets/settingstabs/<tab>/MonitorsTab.dll
+                Path.Combine(tabFolder, "net8.0-windows", assemblyFileName),       // assets/settingstabs/<tab>/net8.0-windows/MonitorsTab.dll
+                Path.Combine(AppDomain.CurrentDomain.BaseDirectory, assemblyFileName) // bin\<cfg>\net8.0-windows\MonitorsTab.dll (fallback)
+            };
+
+            foreach (var p in candidates)
+                if (File.Exists(p)) return p;
+
+            return null;
         }
 
 
-        private void BuildNav()
+        private void BuildNavFromTabs()
         {
             _nav.Nodes.Clear();
-            _nav.Nodes.Add(new TreeNode("General")  { Tag = "general"  });
-            _nav.Nodes.Add(new TreeNode("Monitors") { Tag = "monitors" });
-            _nav.Nodes.Add(new TreeNode("Widgets")  { Tag = "widgets"  });
-            _nav.ExpandAll();
+
+            try
+            {
+                string root = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "assets", "settingstabs");
+                _tabs.LoadFromFolder(root);
+
+                foreach (var t in _tabs.Tabs)
+                {
+                    // Only show tabs that actually loaded
+                    var node = new TreeNode(t.Instance.Title ?? t.Manifest.displayName ?? t.Manifest.name ?? t.FolderName)
+                    {
+                        Tag = t
+                    };
+                    _nav.Nodes.Add(node);
+                }
+
+                _nav.ExpandAll();
+
+                if (_nav.Nodes.Count > 0)
+                {
+                    _nav.SelectedNode = _nav.Nodes[0];
+                }
+                else
+                {
+                    // No tabs found: show a friendly placeholder
+                    ShowPage(new PlaceholderPage("No settings tabs found in assets/settingstabs."));
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine("[Tabs] load error: " + ex.Message);
+                ShowPage(new PlaceholderPage("Failed to load tabs."));
+            }
         }
 
         private void Nav_AfterSelect(object? sender, TreeViewEventArgs e)
         {
             var node = e.Node;
-            if (node is null) { ShowPage(new PlaceholderPage("Select an item on the left.")); return; }
-
-            var tag = node.Tag as string;
-            if (string.IsNullOrWhiteSpace(tag)) { ShowPage(new PlaceholderPage("Select an item on the left.")); return; }
-
-            switch (tag)
+            if (node?.Tag is not TabManager.TabHandle handle)
             {
-                case "widgets":
-                    ShowPage(new WidgetsGridPage(_widgets, OpenWidgetEditor));
-                    break;
-                case "general":
-                    ShowPage(new PlaceholderPage("General settings coming soon."));
-                    break;
-                case "monitors":
-                    ShowPage(new PlaceholderPage("Monitor layout & selection."));
-                    break;
-                default:
-                    ShowPage(new PlaceholderPage("Select an item on the left."));
-                    break;
+                ShowPage(new PlaceholderPage("Select a tab on the left."));
+                return;
+            }
+
+            try
+            {
+                var ctrl = handle.Instance.CreateControl() ?? new PlaceholderPage("Tab has no content.");
+                // Optional: Provide shared context to tabs via Tag or service locator:
+                // ctrl.Tag = new { Widgets = _widgets };
+
+                ShowPage(ctrl);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[Tabs] create control error for '{handle.Manifest.name}': {ex.Message}");
+                ShowPage(new PlaceholderPage("Failed to create tab UI."));
             }
         }
 
@@ -104,291 +151,16 @@ namespace Cronator
             if (_currentPage != null)
             {
                 _contentHost.Controls.Remove(_currentPage);
-                _currentPage.Dispose();
+                try { _currentPage.Dispose(); } catch { }
                 _currentPage = null;
             }
             _currentPage = page;
             page.Dock = DockStyle.Fill;
             _contentHost.Controls.Add(page);
         }
-
-        private void OpenWidgetEditor(WidgetInfo info)
-        {
-            ShowPage(new WidgetEditorPage(
-                info ?? new WidgetInfo(),
-                onApply: () =>
-                {
-                    WidgetPersistence.SaveUserConfig(info ?? new WidgetInfo());
-                    try { Program.TrayUpdateOnce(); } catch { /* non-fatal */ }
-                },
-                onBack: () =>
-                {
-                    var widgetsNode = _nav.Nodes.Cast<TreeNode?>()
-                        .FirstOrDefault(n => string.Equals(n?.Tag as string, "widgets", StringComparison.OrdinalIgnoreCase));
-                    if (widgetsNode is not null)
-                        _nav.SelectedNode = widgetsNode;
-                    else
-                        ShowPage(new WidgetsGridPage(_widgets, OpenWidgetEditor));
-                }));
-        }
     }
 
-    // ---------- “Widgets” grid page ----------
-    internal sealed class WidgetsGridPage : UserControl
-    {
-        private readonly ListView _lv;
-        private readonly ImageList _images;
-        private readonly List<WidgetInfo> _widgets;
-        private readonly Action<WidgetInfo> _open;
-
-        public WidgetsGridPage(List<WidgetInfo> widgets, Action<WidgetInfo> openEditor)
-        {
-            _widgets = widgets ?? new List<WidgetInfo>();
-            _open = openEditor ?? (_ => { });
-
-            var header = new Label
-            {
-                Text = "Widgets",
-                Font = new Font("Segoe UI", 14, FontStyle.Bold),
-                Dock = DockStyle.Top,
-                Padding = new Padding(12),
-                Height = 44
-            };
-            Controls.Add(header);
-
-            _images = new ImageList { ImageSize = new Size(48, 48), ColorDepth = ColorDepth.Depth32Bit };
-            _lv = new ListView
-            {
-                Dock = DockStyle.Fill,
-                View = View.LargeIcon,
-                LargeImageList = _images,
-                BorderStyle = BorderStyle.None
-            };
-
-            _lv.ItemActivate += (s, e) =>
-            {
-                if (_lv.SelectedItems.Count == 0) return;
-                var item = _lv.SelectedItems[0];
-                if (item is null) return;
-                if (item.Tag is not WidgetInfo info) return;
-                _open(info);
-            };
-
-            Controls.Add(_lv);
-
-            Populate();
-        }
-
-        private void Populate()
-        {
-            _lv.BeginUpdate();
-            try
-            {
-                _lv.Items.Clear();
-                _images.Images.Clear();
-
-                foreach (var w in _widgets.OrderBy(x => x.DisplayName ?? "", StringComparer.OrdinalIgnoreCase))
-                {
-                    var idx = _images.Images.Count;
-                    _images.Images.Add(w.Icon ?? SystemIcons.Information.ToBitmap());
-
-                    var it = new ListViewItem
-                    {
-                        Text = $"{(string.IsNullOrWhiteSpace(w.DisplayName) ? "(unnamed)" : w.DisplayName)} {(w.Enabled ? "✓" : "✕")}",
-                        ImageIndex = idx,
-                        Tag = w
-                    };
-                    _lv.Items.Add(it);
-                }
-            }
-            finally
-            {
-                _lv.EndUpdate();
-            }
-        }
-    }
-
-    // ---------- Widget editor page ----------
-    internal sealed class WidgetEditorPage : UserControl
-    {
-        private readonly WidgetInfo _info;
-        private readonly PropertyGrid _grid;
-        private readonly CheckBox _enabled;
-        private readonly Button _apply;
-        private readonly Button _back;
-
-        private readonly DynamicSettingsObject _dynamicSettings;
-
-        public WidgetEditorPage(WidgetInfo info, Action onApply, Action onBack)
-        {
-            _info = info ?? new WidgetInfo();
-            onApply ??= static () => { };
-            onBack  ??= static () => { };
-
-            var header = new Panel { Dock = DockStyle.Top, Height = 64, Padding = new Padding(12) };
-            var icon = new PictureBox
-            {
-                Size = new Size(40, 40),
-                SizeMode = PictureBoxSizeMode.Zoom,
-                Image = _info.Icon ?? SystemIcons.Information.ToBitmap()
-            };
-            var title = new Label
-            {
-                AutoSize = true,
-                Font = new Font("Segoe UI", 12, FontStyle.Bold),
-                Text = $"{(_info.DisplayName ?? "(unnamed)")}  {_info.Version}"
-            };
-            _enabled = new CheckBox { AutoSize = true, Text = "Enabled", Checked = _info.Enabled, Left = 0, Top = 34 };
-
-            var headLayout = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.LeftToRight, WrapContents = false, AutoSize = false };
-            headLayout.Controls.Add(icon);
-            headLayout.Controls.Add(new Panel { Width = 8 });
-            headLayout.Controls.Add(new FlowLayoutPanel
-            {
-                FlowDirection = FlowDirection.TopDown,
-                WrapContents = false,
-                AutoSize = true,
-                Controls = { title, _enabled }
-            });
-            header.Controls.Add(headLayout);
-            Controls.Add(header);
-
-            _grid = new PropertyGrid { Dock = DockStyle.Fill, HelpVisible = true, ToolbarVisible = false };
-            Controls.Add(_grid);
-
-            var footer = new Panel { Dock = DockStyle.Bottom, Height = 48, Padding = new Padding(12) };
-            _apply = new Button { Text = "Apply", AutoSize = true };
-            _back  = new Button { Text = "Back",  AutoSize = true, Left = 90 };
-
-            // >>> IMPORTANT: create _dynamicSettings BEFORE wiring handlers that use it <<<
-            _dynamicSettings = new DynamicSettingsObject(_info);
-            _grid.SelectedObject = _dynamicSettings;
-
-            _apply.Click += (s, e) =>
-            {
-                _info.Enabled = _enabled.Checked;
-
-                _info.UserSettings ??= new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
-                _dynamicSettings.CopyToDictionary(_info.UserSettings);
-
-                _info.EffectiveSettings ??= new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
-                _info.EffectiveSettings = WidgetPersistence.MergeSettings(_info);
-
-                onApply();
-            };
-            _back.Click += (s, e) => onBack();
-
-            footer.Controls.Add(_apply);
-            footer.Controls.Add(_back);
-            Controls.Add(footer);
-        }
-    }
-
-    // ---------- PropertyGrid dynamic backing object ----------
-    internal sealed class DynamicSettingsObject : ICustomTypeDescriptor
-    {
-        private readonly WidgetInfo _info;
-        private readonly Dictionary<string, object?> _working = new(StringComparer.OrdinalIgnoreCase);
-
-        public DynamicSettingsObject(WidgetInfo info)
-        {
-            _info = info ?? new WidgetInfo();
-
-            _info.UserSettings      ??= new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
-            _info.EffectiveSettings ??= new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
-
-            foreach (var kv in _info.UserSettings)
-                _working[kv.Key ?? string.Empty] = kv.Value;
-
-            foreach (var kv in _info.EffectiveSettings)
-            {
-                var key = kv.Key ?? string.Empty;
-                if (!_working.ContainsKey(key))
-                    _working[key] = kv.Value;
-            }
-        }
-
-        public void CopyToDictionary(Dictionary<string, object?> target)
-        {
-            if (target is null) return;
-            target.Clear();
-            foreach (var kv in _working) target[kv.Key] = kv.Value;
-        }
-
-        public AttributeCollection GetAttributes() => AttributeCollection.Empty;
-        public string GetClassName() => (_info.DisplayName ?? "Widget") + " Settings";
-        public string GetComponentName() => _info.DisplayName ?? "Widget";
-        public TypeConverter GetConverter() => new TypeConverter();
-        public EventDescriptor? GetDefaultEvent() => null;
-        public PropertyDescriptor? GetDefaultProperty() => null;
-        public object? GetEditor(Type editorBaseType) => null;
-        public EventDescriptorCollection GetEvents(Attribute[]? attributes) => EventDescriptorCollection.Empty;
-        public EventDescriptorCollection GetEvents() => EventDescriptorCollection.Empty;
-        public PropertyDescriptorCollection GetProperties(Attribute[]? attributes) => GetProperties();
-
-        public PropertyDescriptorCollection GetProperties()
-        {
-            var keys = _working.Keys
-                .Where(k => !string.IsNullOrWhiteSpace(k))
-                .Select(k => k!)
-                .Distinct(StringComparer.OrdinalIgnoreCase)
-                .ToArray();
-
-            Array.Sort(keys, StringComparer.OrdinalIgnoreCase);
-
-            var props = new PropertyDescriptor[keys.Length];
-            for (int i = 0; i < keys.Length; i++)
-            {
-                var key = keys[i];
-                props[i] = new DictPropertyDescriptor(key, _working);
-            }
-            return new PropertyDescriptorCollection(props, readOnly: true);
-        }
-
-        public object? GetPropertyOwner(PropertyDescriptor? pd) => this;
-
-        private sealed class DictPropertyDescriptor : PropertyDescriptor
-        {
-            private readonly string _key;
-            private readonly Dictionary<string, object?> _dict;
-
-            public DictPropertyDescriptor(string key, Dictionary<string, object?> dict)
-                : base(key ?? string.Empty, BuildAttributes(key ?? string.Empty, dict))
-            {
-                _key = key ?? string.Empty;
-                _dict = dict ?? throw new ArgumentNullException(nameof(dict));
-            }
-
-            public override bool CanResetValue(object? component) => false;
-            public override Type ComponentType => typeof(DynamicSettingsObject);
-            public override object? GetValue(object? component) => _dict.TryGetValue(_key, out var v) ? v : null;
-            public override bool IsReadOnly => false;
-            public override Type PropertyType => InferType(GetValue(null));
-            public override void ResetValue(object? component) { }
-            public override void SetValue(object? component, object? value)
-            {
-                _dict[_key] = value;
-                OnValueChanged(component, EventArgs.Empty);
-            }
-            public override bool ShouldSerializeValue(object? component) => true;
-
-            private static Attribute[] BuildAttributes(string key, Dictionary<string, object?> dict)
-            {
-                dict.TryGetValue(key, out var val);
-                if (val is Color)
-                    return new Attribute[] { new TypeConverterAttribute(typeof(ColorConverter)) };
-                return Array.Empty<Attribute>();
-            }
-
-            private static Type InferType(object? v)
-            {
-                if (v is null) return typeof(string);
-                return v.GetType();
-            }
-        }
-    }
-
-    // ---------- Placeholder simple page ----------
+    // ---------------- Placeholder page ----------------
     internal sealed class PlaceholderPage : UserControl
     {
         public PlaceholderPage(string text)
@@ -403,44 +175,229 @@ namespace Cronator
         }
     }
 
-    // ---------- Widget persistence helpers ----------
-    public static class WidgetPersistence
+    // ---------------- Tabs loader (mirrors your widget loader robustness) ----------------
+    internal sealed class TabManager
     {
-        public static void SaveUserConfig(WidgetInfo info)
+        public readonly List<TabHandle> Tabs = new();
+
+        public sealed class TabManifest
         {
-            if (info is null) return;
-
-            info.FolderPath ??= string.Empty;
-            if (string.IsNullOrWhiteSpace(info.FolderPath) || !Directory.Exists(info.FolderPath)) return;
-
-            info.UserSettings ??= new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
-
-            var path = Path.Combine(info.FolderPath, "config.user.json");
-            var payload = new
-            {
-                enabled = info.Enabled,
-                settings = info.UserSettings
-            };
-            var json = System.Text.Json.JsonSerializer.Serialize(payload,
-                new System.Text.Json.JsonSerializerOptions { WriteIndented = true });
-            File.WriteAllText(path, json);
+            public string? name { get; set; }          // e.g., "monitors"
+            public string? displayName { get; set; }   // e.g., "Monitors"
+            public string? kind { get; set; }          // "dll"
+            public string? assembly { get; set; }      // "MonitorsTab.dll"
+            public string? type { get; set; }          // "Cronator.Tabs.Monitors.MonitorsTab"
+            public bool enabled { get; set; } = true;
         }
 
-        public static Dictionary<string, object?> MergeSettings(WidgetInfo info)
+        public sealed class TabHandle
         {
-            var effective = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
+            public string FolderPath { get; init; } = "";
+            public string FolderName { get; init; } = "";
+            public TabManifest Manifest { get; init; } = new();
+            public ISettingsTab Instance { get; init; } = default!;
+        }
 
-            if (info.EffectiveSettings != null)
-                foreach (var kv in info.EffectiveSettings) effective[kv.Key] = kv.Value;
 
-            if (info.UserSettings != null)
-                foreach (var kv in info.UserSettings) effective[kv.Key] = kv.Value;
+        private sealed class ReflectionTabAdapter : ISettingsTab
+        {
+            private readonly object _impl;
+            private readonly PropertyInfo _id;
+            private readonly PropertyInfo _title;
+            private readonly MethodInfo _create;
 
-            return effective;
+            public ReflectionTabAdapter(object impl)
+            {
+                _impl = impl;
+                var t = impl.GetType();
+                _id = t.GetProperty("Id")!;
+                _title = t.GetProperty("Title")!;
+                _create = t.GetMethod("CreateControl")!;
+            }
+
+            public string Id => (string)(_id.GetValue(_impl) ?? "");
+            public string Title => (string)(_title.GetValue(_impl) ?? "");
+            public Control? CreateControl() => (Control?)_create.Invoke(_impl, null);
+        }
+
+
+        public void LoadFromFolder(string root)
+        {
+            Tabs.Clear();
+
+            if (!Directory.Exists(root))
+            {
+                Console.WriteLine($"[Tabs] root folder not found: {root}");
+                return;
+            }
+
+            foreach (var folder in Directory.EnumerateDirectories(root))
+            {
+                var fname = Path.GetFileName(folder);
+                try
+                {
+                    var manifestPath = Path.Combine(folder, "manifest.json");
+                    if (!File.Exists(manifestPath))
+                    {
+                        Console.WriteLine($"[Tabs] {fname}: missing manifest.json → skipped.");
+                        continue;
+                    }
+
+                    var manifest = JsonSerializer.Deserialize<TabManifest>(File.ReadAllText(manifestPath)) ?? new TabManifest();
+                    if (!manifest.enabled)
+                    {
+                        Console.WriteLine($"[Tabs] {fname}: disabled.");
+                        continue;
+                    }
+
+                    if (!"dll".Equals(manifest.kind, StringComparison.OrdinalIgnoreCase))
+                    {
+                        Console.WriteLine($"[Tabs] {fname}: unsupported kind '{manifest.kind}'.");
+                        continue;
+                    }
+
+                    var asmDecl = manifest.assembly;
+                    if (string.IsNullOrWhiteSpace(asmDecl))
+                    {
+                        Console.WriteLine($"[Tabs] {fname}: 'assembly' missing → skipped.");
+                        continue;
+                    }
+
+                    if (!TryResolveAssemblyPath(folder, asmDecl!, out var asmPath))
+                    {
+                        Console.WriteLine($"[Tabs] {fname}: assembly not found.");
+                        continue;
+                    }
+
+                    var asm = System.Runtime.Loader.AssemblyLoadContext.Default.LoadFromAssemblyPath(asmPath);
+
+                    Type? t = null;
+                    if (!string.IsNullOrWhiteSpace(manifest.type))
+                    {
+                        t = asm.GetType(manifest.type!, throwOnError: false, ignoreCase: false);
+                        if (t == null)
+                        {
+                            Console.WriteLine($"[Tabs] {fname}: type not found in '{Path.GetFileName(asmPath)}': {manifest.type}");
+                            // fall through to auto-detect
+                        }
+                    }
+
+                    if (t == null)
+                    {
+                        t = AutoDetectTabType(asm);
+                        if (t != null)
+                        {
+                            Console.WriteLine($"[Tabs] {fname}: auto-detected tab type '{t.FullName}'.");
+                        }
+                        else
+                        {
+                            Console.WriteLine($"[Tabs] {fname}: no ISettingsTab found → skipped.");
+                            continue;
+                        }
+                    }
+
+                    var raw = Activator.CreateInstance(t);
+                    ISettingsTab? inst = raw as ISettingsTab;
+                    if (inst == null)
+                    {
+                        // Wrap with adapter if duck-typed
+                        inst = new ReflectionTabAdapter(raw!);
+                    }
+
+                    Tabs.Add(new TabHandle
+                    {
+                        FolderPath = folder,
+                        FolderName = fname,
+                        Manifest = manifest,
+                        Instance = inst
+                    });
+
+                    var title = inst.Title ?? manifest.displayName ?? manifest.name ?? fname;
+                    Console.WriteLine($"[Tabs] loaded: {title} ({Path.GetFileName(asmPath)})");
+                }
+                catch (BadImageFormatException bif)
+                {
+                    Console.WriteLine($"[Tabs] {fname} load error (BadImageFormat): {bif.Message}");
+                }
+                catch (FileLoadException fle)
+                {
+                    Console.WriteLine($"[Tabs] {fname} load error (FileLoad): {fle.Message}");
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[Tabs] {fname} load error: {ex.Message}");
+                }
+            }
+
+            if (Tabs.Count == 0) Console.WriteLine("[Tabs] none loaded.");
+        }
+
+// inside TabManager
+        private static Type? AutoDetectTabType(Assembly asm)
+        {
+            try
+            {
+                foreach (var t in asm.GetExportedTypes())
+                {
+                    if (t.IsAbstract || !t.IsClass) continue;
+                    if (typeof(ISettingsTab).IsAssignableFrom(t)) return t;
+
+                    // Duck-type fallback: Id (string), Title (string), CreateControl(): Control
+                    var idProp = t.GetProperty("Id", BindingFlags.Instance | BindingFlags.Public);
+                    var titleProp = t.GetProperty("Title", BindingFlags.Instance | BindingFlags.Public);
+                    var cc = t.GetMethod("CreateControl", BindingFlags.Instance | BindingFlags.Public, new Type[0]);
+
+                    if (idProp?.PropertyType == typeof(string) &&
+                        titleProp?.PropertyType == typeof(string) &&
+                        cc is not null && typeof(Control).IsAssignableFrom(cc.ReturnType))
+                    {
+                        return t;
+                    }
+                }
+            }
+            catch { }
+            return null;
+        }
+
+
+        private static bool TryResolveAssemblyPath(string folder, string asmRelativeOrName, out string fullPath)
+        {
+            // 1) exact relative
+            var candidate = Path.Combine(folder, asmRelativeOrName);
+            if (File.Exists(candidate)) { fullPath = candidate; return true; }
+
+            // 2) search exact file recursively (handles net8.0-windows subfolder etc.)
+            var fileName = Path.GetFileName(asmRelativeOrName);
+            var found = Directory.GetFiles(folder, fileName, SearchOption.AllDirectories).FirstOrDefault();
+            if (!string.IsNullOrEmpty(found)) { fullPath = found; return true; }
+
+            // 3) fallback: newest *.dll in folder tree
+            var anyDll = Directory.GetFiles(folder, "*.dll", SearchOption.AllDirectories)
+                                  .OrderByDescending(File.GetLastWriteTimeUtc)
+                                  .FirstOrDefault();
+            if (!string.IsNullOrEmpty(anyDll))
+            {
+                Console.WriteLine($"[Tabs] {Path.GetFileName(folder)}: using discovered DLL '{Path.GetFileName(anyDll)}'.");
+                fullPath = anyDll;
+                return true;
+            }
+
+            fullPath = string.Empty;
+            return false;
+        }
+
+        public sealed class TabHandleComparer : IComparer<TabHandle>
+        {
+            public int Compare(TabHandle? x, TabHandle? y)
+            {
+                var sx = x?.Instance?.Title ?? x?.Manifest?.displayName ?? x?.Manifest?.name ?? x?.FolderName ?? "";
+                var sy = y?.Instance?.Title ?? y?.Manifest?.displayName ?? y?.Manifest?.name ?? y?.FolderName ?? "";
+                return StringComparer.OrdinalIgnoreCase.Compare(sx, sy);
+            }
         }
     }
 
-    // ---------- WidgetInfo ----------
+    // ---------- WidgetInfo (unchanged; kept so tabs can use it if needed) ----------
     public sealed class WidgetInfo
     {
         public string Id = "";

@@ -1,0 +1,8 @@
+{
+  "name": "monitors",
+  "displayName": "Monitors",
+  "kind": "dll",
+  "assembly": "MonitorsTab.dll",
+  "type": "Cronator.Tabs.Monitors.MonitorsTab",
+  "enabled": true
+}

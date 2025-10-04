@@ -10,12 +10,12 @@
 using System;
 using System.Reflection;
 
-[assembly: System.Reflection.AssemblyCompanyAttribute("ClockWidget")]
+[assembly: System.Reflection.AssemblyCompanyAttribute("MonitorsTab")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
 [assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+f8f9396b784392c3014b437c8ce6301027d13037")]
-[assembly: System.Reflection.AssemblyProductAttribute("ClockWidget")]
-[assembly: System.Reflection.AssemblyTitleAttribute("ClockWidget")]
+[assembly: System.Reflection.AssemblyProductAttribute("MonitorsTab")]
+[assembly: System.Reflection.AssemblyTitleAttribute("MonitorsTab")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]
 [assembly: System.Runtime.Versioning.TargetPlatformAttribute("Windows7.0")]
 [assembly: System.Runtime.Versioning.SupportedOSPlatformAttribute("Windows7.0")]

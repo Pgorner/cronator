@@ -8,7 +8,8 @@
     ".NETCoreApp,Version=v8.0": {
       "cronator/1.0.0": {
         "dependencies": {
-          "ClockWidget": "1.0.0"
+          "ClockWidget": "1.0.0",
+          "MonitorsTab": "1.0.0"
         },
         "runtime": {
           "cronator.dll": {}
@@ -17,6 +18,11 @@
       "ClockWidget/1.0.0": {
         "runtime": {
           "ClockWidget.dll": {}
+        }
+      },
+      "MonitorsTab/1.0.0": {
+        "runtime": {
+          "MonitorsTab.dll": {}
         }
       }
     }
@@ -28,6 +34,11 @@
       "sha512": ""
     },
     "ClockWidget/1.0.0": {
+      "type": "project",
+      "serviceable": false,
+      "sha512": ""
+    },
+    "MonitorsTab/1.0.0": {
       "type": "project",
       "serviceable": false,
       "sha512": ""

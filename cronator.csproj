@@ -8,31 +8,50 @@
     <ImplicitUsings>enable</ImplicitUsings>
   </PropertyGroup>
 
-  <!-- Build the widget project automatically -->
+  <!-- Build plugin projects -->
   <ItemGroup>
     <ProjectReference Include="assets\widgets\clock\ClockWidget.csproj" />
+    <ProjectReference Include="assets\settingstabs\monitors\MonitorsTab.csproj" />
   </ItemGroup>
 
-  <!-- Make sure we DO NOT compile or copy nested obj/bin from widget folders -->
+  <!-- Don't compile sources under assets in the main app -->
   <ItemGroup>
-    <!-- Stop the SDK default Compile/None globs from picking up generated .cs -->
-    <Compile Remove="assets\widgets\**\obj\**\*.cs" />
-    <Compile Remove="assets\widgets\**\bin\**\*.cs" />
-    <None    Remove="assets\widgets\**\obj\**\*" />
-    <None    Remove="assets\widgets\**\bin\**\*" />
-    <Content Remove="assets\widgets\**\obj\**\*" />
-    <Content Remove="assets\widgets\**\bin\**\*" />
+    <Compile Remove="assets\**\*.cs" />
+    <None    Remove="assets\**\obj\**\*" />
+    <None    Remove="assets\**\bin\**\*" />
+    <Content Remove="assets\**\obj\**\*" />
+    <Content Remove="assets\**\bin\**\*" />
   </ItemGroup>
 
-  <!-- Copy only the useful stuff in assets (logos + widget trees),
-       but still exclude any nested obj/bin that might exist -->
+  <!-- Copy assets (exclude code/proj/obj/bin) -->
   <ItemGroup>
     <EmbeddedResource Include="assets\logo.gif" />
     <EmbeddedResource Include="assets\logo.ico" />
-
     <Content Include="assets\**\*"
-             Exclude="assets\widgets\**\obj\**;assets\widgets\**\bin\**">
+             Exclude="assets\**\obj\**;assets\**\bin\**;assets\**\*.cs;assets\**\*.csproj">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
   </ItemGroup>
+
+  <!-- Copy settings tab DLLs from resolved references into assets\settingstabs -->
+  <Target Name="CopySettingsTabsToAssets" AfterTargets="ResolveReferences">
+    <PropertyGroup>
+      <TabsRoot>$(MSBuildProjectDirectory)\assets\settingstabs</TabsRoot>
+    </PropertyGroup>
+
+    <!-- Grab MonitorsTab.dll from the references that MSBuild resolved for this project -->
+    <ItemGroup>
+      <_MonitorsTabDll Include="@(ReferenceCopyLocalPaths)"
+                       Condition="'%(ReferenceCopyLocalPaths.Filename)' == 'MonitorsTab'
+                                 and '%(ReferenceCopyLocalPaths.Extension)' == '.dll'" />
+    </ItemGroup>
+
+    <Message Text="Copying settings tab: %(_MonitorsTabDll.Identity)" Importance="Low"
+             Condition="'@(_MonitorsTabDll)' != ''"/>
+
+    <Copy SourceFiles="@(_MonitorsTabDll)"
+          DestinationFolder="$(TabsRoot)\monitors"
+          SkipUnchangedFiles="true"
+          Condition="'@(_MonitorsTabDll)' != ''"/>
+  </Target>
 </Project>
